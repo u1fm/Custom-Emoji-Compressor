@@ -406,7 +406,9 @@ function getFileFormat(file, isAnimated) {
 </main>
 
 <footer>
-  <p>Created by <a href="https://mi.u1f.info/@u1f" target="_blank" rel="noopener noreferrer">葵@u1f</a></p>
+  <p><a href="https://misskey.io/@u1f" target="_blank" rel="noopener noreferrer">Misskey.io account</a></p>
+  <p><a href="https://mi.u1f.info/@u1f" target="_blank" rel="noopener noreferrer">Misskey 個人サーバー</a></p>
+  <p>製作者 : 葵@u1f</p>
 </footer>
 
 <style>
@@ -499,6 +501,7 @@ footer {
     padding-bottom: 2rem;
     color: #666;
     font-size: 0.95rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif;
   }
   footer a {
     color: #007bff;
