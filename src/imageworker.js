@@ -1,13 +1,9 @@
 import { ImagequantImage, Imagequant } from 'imagequant';
-// ★ decode をインポートに追加
 import { encode, decode } from '@jsquash/webp';
 import apngjs from 'apng-js';
 const parseAPNG = typeof apngjs === 'function' ? apngjs : apngjs.default;
 import { parseGIF, decompressFrames } from 'gifuct-js';
 
-// ==========================================
-// 自作 WebP Assembler (結合器)
-// ==========================================
 function assembleAnimatedWebP(frames, width, height) {
   let totalPayloadSize = 0;
   
@@ -95,12 +91,6 @@ function assembleAnimatedWebP(frames, width, height) {
   return buffer;
 }
 
-
-// ==========================================
-// デコーダー クラス群 (ストリーミング対応)
-// ==========================================
-
-// 1. ネイティブ (ImageDecoder API)
 class NativeDecoder {
   async init(file, mimeType) {
     this.decoder = new ImageDecoder({ data: file.stream(), type: mimeType });
@@ -129,7 +119,6 @@ class NativeDecoder {
   }
 }
 
-// 2. ★ 新規：自作WebP Demuxer ＋ jsquashフォールバック ★
 function createStaticWebP(frameWidth, frameHeight, frameData) {
   let hasAlpha = false;
   let checkOffset = 0;
@@ -150,12 +139,11 @@ function createStaticWebP(frameWidth, frameHeight, frameData) {
   const view = new DataView(buffer);
   const u8 = new Uint8Array(buffer);
 
-  u8.set([82, 73, 70, 70], 0); // 'RIFF'
+  u8.set([82, 73, 70, 70], 0);
   view.setUint32(4, fileSize, true);
-  u8.set([87, 69, 66, 80], 8); // 'WEBP'
+  u8.set([87, 69, 66, 80], 8);
 
-  // 静止画用のVP8Xチャンク (アニメーションフラグを落とす)
-  u8.set([86, 80, 56, 88], 12); // 'VP8X'
+  u8.set([86, 80, 56, 88], 12);
   view.setUint32(16, 10, true);
   u8[20] = hasAlpha ? 0x10 : 0x00;
   u8[24] = (frameWidth - 1) & 0xFF;
@@ -165,7 +153,6 @@ function createStaticWebP(frameWidth, frameHeight, frameData) {
   u8[28] = ((frameHeight - 1) >> 8) & 0xFF;
   u8[29] = ((frameHeight - 1) >> 16) & 0xFF;
 
-  // フレームデータを丸ごと結合
   u8.set(frameData, 30);
   return buffer;
 }
@@ -208,13 +195,11 @@ class WebpFallbackDecoder {
         });
       }
       offset = chunkDataEnd;
-      // ★ 万が一異常なチャンクサイズが指定されて無限ループになるのを防ぐ安全装置
       if (chunkSize === 0) break; 
     }
     
     this.frameCount = this.frames.length;
 
-    // ★ もしANMFチャンクが1つも見つからなかった場合（静止画WebPだった場合）のフォールバック
     if (this.frameCount === 0) {
       console.warn("WebP Demuxer: アニメーションフレームが見つかりませんでした。静止画として処理します。");
       const blob = new Blob([buffer], { type: 'image/webp' });
@@ -234,7 +219,6 @@ class WebpFallbackDecoder {
   }
 
   async getFrame(i) {
-    // ★ 静止画としてフォールバックされた場合の処理
     if (this.staticBmp) {
       const canvas = new OffscreenCanvas(this.width, this.height);
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -270,7 +254,6 @@ class WebpFallbackDecoder {
   }
 }
 
-// 3. GIF JSフォールバック (gifuct-js)
 class GifFallbackDecoder {
   async init(buffer) {
     const gif = parseGIF(buffer);
@@ -314,7 +297,6 @@ class GifFallbackDecoder {
   }
 }
 
-// 4. APNG JSフォールバック (apng-js)
 class ApngFallbackDecoder {
   async init(buffer) {
     const apng = parseAPNG(buffer);
@@ -365,7 +347,6 @@ class ApngFallbackDecoder {
   }
 }
 
-// 5. 静止画・その他のフォールバック
 class StaticFallbackDecoder {
   async init(file) {
     const bmp = await createImageBitmap(file);
@@ -385,39 +366,29 @@ class StaticFallbackDecoder {
   }
 }
 
-// ファイル形式のバイナリ判定（拡張子やMIMEタイプに騙されない絶対判定）
 function getFormatInfo(bytes) {
-  // GIF (GIF87a or GIF89a)
   if (bytes.length >= 3 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
     return { format: 'gif', mimeType: 'image/gif' };
   }
-  // PNG / APNG
   if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
     for (let i = 0; i < Math.min(bytes.length - 4, 1024); i++) {
-      // 'acTL' チャンクを探す
       if (bytes[i] === 0x61 && bytes[i+1] === 0x63 && bytes[i+2] === 0x54 && bytes[i+3] === 0x4c) {
         return { format: 'apng', mimeType: 'image/png' };
       }
     }
     return { format: 'png', mimeType: 'image/png' };
   }
-  // WebP / Animated WebP
   if (bytes.length >= 4 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
     for (let i = 12; i < Math.min(bytes.length - 4, 256); i++) {
-      // 'ANIM' チャンクを探す
       if (bytes[i] === 0x41 && bytes[i+1] === 0x4E && bytes[i+2] === 0x49 && bytes[i+3] === 0x4D) {
         return { format: 'animated-webp', mimeType: 'image/webp' };
       }
     }
     return { format: 'webp', mimeType: 'image/webp' };
   }
-  // 未知のフォーマット
   return { format: 'static', mimeType: null };
 }
 
-// ==========================================
-// メイン処理キュー
-// ==========================================
 let currentJobPromise = Promise.resolve();
 let latestJobId = 0;
 
@@ -439,10 +410,8 @@ async function processImage(jobId, file, settings, isFinal) {
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     
-    // ★ ブラウザの申告を無視し、バイナリからフォーマットとMIMEタイプを絶対判定する
     let { format, mimeType } = getFormatInfo(bytes);
     
-    // バイナリ判定できなかった場合のみ、ブラウザの申告（拡張子）に頼る
     if (!mimeType) {
       mimeType = file.type;
       if (!mimeType) {
@@ -454,7 +423,6 @@ async function processImage(jobId, file, settings, isFinal) {
       }
     }
     
-    // ★ ImageDecoderを意図的にコメントアウトして「Safari環境」をシミュレート
     let useNative = false;
 
     if (typeof ImageDecoder !== 'undefined') {
@@ -474,7 +442,6 @@ async function processImage(jobId, file, settings, isFinal) {
       }
     }
 
-    // ★ JSフォールバック分岐に WebpFallbackDecoder を追加！
     if (!useNative) {
       if (format === 'animated-webp') {
         decoder = new WebpFallbackDecoder();

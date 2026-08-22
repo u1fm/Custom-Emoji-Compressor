@@ -11,6 +11,8 @@
   let currentFrame = -1; 
   let zoomedSrc = null;
   
+  let showLicenseModal = false;
+
   let isProcessing = false;
   let isSaving = false;
   
@@ -27,7 +29,6 @@
   const colorPresets = [16, 32, 64, 128, 256];
   let presetIndex = 4;
   
-  // ★ 非表示のファイル選択inputタグを参照するための変数
   let fileInput;
 
   $: if (!isFreeColorMode) {
@@ -127,7 +128,6 @@ detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '
     };
   });
 
-  // ★ 共通のファイル処理関数
   function processSelectedFile(file) {
     if (!file) return;
 
@@ -149,12 +149,10 @@ detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '
     processSelectedFile(event.dataTransfer.files[0]);
   }
   
-  // ★ タップ（クリック）でファイル選択ダイアログを開く
   function handleFileInputChange(event) {
     processSelectedFile(event.target.files[0]);
   }
 
-  // ★ クリップボードからのペースト（Ctrl+V）に対応
   function handlePaste(event) {
     const items = event.clipboardData?.items;
     if (!items) return;
@@ -162,7 +160,7 @@ detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '
       if (item.type.startsWith('image/')) {
         const file = item.getAsFile();
         processSelectedFile(file);
-        break; // 最初の画像だけ処理する
+        break;
       }
     }
   }
@@ -195,10 +193,8 @@ detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '
   
 function getFileFormat(file, isAnimated) {
     if (!file) return '';
-    // ★ Workerの判定結果があればそれを優先して表示
     let format = detectedFormatName; 
     
-    // Workerからの返答がない（処理前）場合は拡張子から仮表示
     if (!format) {
       format = file.name.split('.').pop().toUpperCase();
       if (file.type === 'image/png') format = 'PNG';
@@ -221,7 +217,6 @@ function getFileFormat(file, isAnimated) {
   $: sizeDiffPercent = resultStats ? Math.abs(Math.round((1 - resultStats.processed / resultStats.original) * 100)) : 0;
 </script>
 
-<!-- ★ 画面全体のどこでペーストしても反応するように設定 -->
 <svelte:window on:paste={handlePaste} />
 
 <main>
@@ -409,11 +404,47 @@ function getFileFormat(file, isAnimated) {
   <p><a href="https://misskey.io/@u1f" target="_blank" rel="noopener noreferrer">Misskey.io account</a></p>
   <p><a href="https://mi.u1f.info/@u1f" target="_blank" rel="noopener noreferrer">Misskey 個人サーバー</a></p>
   <p>製作者 : 葵@u1f</p>
+  <p class="license-link"><button on:click={() => showLicenseModal = true}>ライセンス表記</button></p>
 </footer>
+
+{#if showLicenseModal}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="zoom-modal" on:click={() => showLicenseModal = false} transition:fade={{ duration: 150 }}>
+    <div class="license-box" on:click|stopPropagation>
+      <h2>オープンソースライセンス</h2>
+      <p class="license-intro">当ツールは、以下のオープンソースソフトウェアおよびライブラリを利用して構築されています。</p>
+      
+      <div class="license-list">
+        <div class="license-item">
+          <strong>Svelte / Vite</strong>
+          <p>MIT License</p>
+        </div>
+        <div class="license-item">
+          <strong>@jsquash/webp</strong>
+          <p>ISC / MIT License</p>
+        </div>
+        <div class="license-item">
+          <strong>apng-js</strong>
+          <p>MIT License</p>
+        </div>
+        <div class="license-item">
+          <strong>gifuct-js</strong>
+          <p>MIT License</p>
+        </div>
+        <div class="license-item">
+          <strong>imagequant (Wasm)</strong>
+          <p>MIT / GPL License</p>
+        </div>
+      </div>
+
+      <button class="close-modal-btn" on:click={() => showLicenseModal = false}>閉じる</button>
+    </div>
+  </div>
+{/if}
 
 <style>
   main { max-width: 800px; margin: 2rem auto; font-family: sans-serif; padding: 0 1rem; }
-  /* ★ ドロップエリアのホバーエフェクトなどを追加 */
   .dropzone { 
     border: 2px dashed #aaa; border-radius: 8px; padding: 3rem 1rem; text-align: center; 
     background: #fdfdfd; cursor: pointer; margin-bottom: 1.5rem; transition: background 0.2s; 
@@ -512,5 +543,80 @@ footer {
   footer a:hover {
     color: #0056b3;
     text-decoration: underline;
+  }
+  .license-link {
+    margin-top: 0.5rem;
+  }
+  .license-link button {
+    background: none;
+    border: none;
+    color: #6c757d;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+  }
+  .license-link button:hover {
+    color: #007bff;
+  }
+
+  .license-box {
+    background: white;
+    padding: 2rem;
+    border-radius: 8px;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    text-align: left;
+    color: #333;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  }
+  .license-box h2 {
+    margin-top: 0;
+    font-size: 1.25rem;
+    border-bottom: 2px solid #eee;
+    padding-bottom: 0.5rem;
+  }
+  .license-intro {
+    font-size: 0.9rem;
+    color: #666;
+    margin-bottom: 1rem;
+  }
+  .license-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+  }
+  .license-item {
+    background: #f8f9fa;
+    padding: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #e9ecef;
+  }
+  .license-item strong {
+    font-size: 0.95rem;
+    color: #007bff;
+  }
+  .license-item p {
+    margin: 0.25rem 0 0 0;
+    font-size: 0.85rem;
+    color: #555;
+  }
+  .close-modal-btn {
+    display: block;
+    width: 100%;
+    background: #007bff;
+    color: white;
+    border: none;
+    padding: 0.75rem;
+    border-radius: 4px;
+    font-weight: bold;
+    cursor: pointer;
+    text-align: center;
+  }
+  .close-modal-btn:hover {
+    background: #0056b3;
   }
 </style>
