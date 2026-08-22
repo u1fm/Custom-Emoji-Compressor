@@ -405,6 +405,10 @@ function getFileFormat(file, isAnimated) {
   {/if}
 </main>
 
+<footer>
+  <p>Created by <a href="https://mi.u1f.info/@u1f" target="_blank" rel="noopener noreferrer">葵@u1f</a></p>
+</footer>
+
 <style>
   main { max-width: 800px; margin: 2rem auto; font-family: sans-serif; padding: 0 1rem; }
   /* ★ ドロップエリアのホバーエフェクトなどを追加 */
@@ -487,5 +491,23 @@ function getFileFormat(file, isAnimated) {
     background-color: #e5e5e5;
     background-image: linear-gradient(45deg, #d0d0d0 25%, transparent 25%), linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d0d0d0 75%), linear-gradient(-45deg, transparent 75%, #d0d0d0 75%);
     background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+  }
+
+footer {
+    text-align: center;
+    margin-top: 3rem;
+    padding-bottom: 2rem;
+    color: #666;
+    font-size: 0.95rem;
+  }
+  footer a {
+    color: #007bff;
+    text-decoration: none;
+    font-weight: bold;
+    transition: color 0.2s;
+  }
+  footer a:hover {
+    color: #0056b3;
+    text-decoration: underline;
   }
 </style>
