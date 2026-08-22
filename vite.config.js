@@ -15,5 +15,12 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp'
     }
+  },
+  // ★ ここから下を追記：WorkerをESモジュールとして出力し、Worker内でもWasmを処理できるようにする
+  worker: {
+    format: 'es',
+    plugins: () => [
+      wasm()
+    ]
   }
 })
