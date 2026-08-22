@@ -1,11 +1,12 @@
 import { ImagequantImage, Imagequant } from 'imagequant';
-import { encode } from '@jsquash/webp';
+// ★ decode をインポートに追加
+import { encode, decode } from '@jsquash/webp';
 import apngjs from 'apng-js';
 const parseAPNG = typeof apngjs === 'function' ? apngjs : apngjs.default;
 import { parseGIF, decompressFrames } from 'gifuct-js';
 
 // ==========================================
-// 自作 WebP Assembler
+// 自作 WebP Assembler (結合器)
 // ==========================================
 function assembleAnimatedWebP(frames, width, height) {
   let totalPayloadSize = 0;
@@ -94,6 +95,7 @@ function assembleAnimatedWebP(frames, width, height) {
   return buffer;
 }
 
+
 // ==========================================
 // デコーダー クラス群 (ストリーミング対応)
 // ==========================================
@@ -101,7 +103,6 @@ function assembleAnimatedWebP(frames, width, height) {
 // 1. ネイティブ (ImageDecoder API)
 class NativeDecoder {
   async init(file, mimeType) {
-    // ★ mimeTypeを明示的に指定してエラーを防ぐ
     this.decoder = new ImageDecoder({ data: file.stream(), type: mimeType });
     await this.decoder.tracks.ready;
     const track = this.decoder.tracks[0];
@@ -128,7 +129,148 @@ class NativeDecoder {
   }
 }
 
-// 2. GIF JSフォールバック (gifuct-js)
+// 2. ★ 新規：自作WebP Demuxer ＋ jsquashフォールバック ★
+function createStaticWebP(frameWidth, frameHeight, frameData) {
+  let hasAlpha = false;
+  let checkOffset = 0;
+  while (checkOffset < frameData.length) {
+    if (checkOffset + 8 > frameData.length) break;
+    const id = String.fromCharCode(...frameData.subarray(checkOffset, checkOffset + 4));
+    if (id === 'ALPH' || id === 'VP8L') {
+      hasAlpha = true;
+      break;
+    }
+    if (id === 'VP8 ') break;
+    const size = new DataView(frameData.buffer, frameData.byteOffset).getUint32(checkOffset + 4, true);
+    checkOffset += 8 + size + (size % 2);
+  }
+
+  const fileSize = 4 + 18 + frameData.length;
+  const buffer = new ArrayBuffer(8 + fileSize);
+  const view = new DataView(buffer);
+  const u8 = new Uint8Array(buffer);
+
+  u8.set([82, 73, 70, 70], 0); // 'RIFF'
+  view.setUint32(4, fileSize, true);
+  u8.set([87, 69, 66, 80], 8); // 'WEBP'
+
+  // 静止画用のVP8Xチャンク (アニメーションフラグを落とす)
+  u8.set([86, 80, 56, 88], 12); // 'VP8X'
+  view.setUint32(16, 10, true);
+  u8[20] = hasAlpha ? 0x10 : 0x00;
+  u8[24] = (frameWidth - 1) & 0xFF;
+  u8[25] = ((frameWidth - 1) >> 8) & 0xFF;
+  u8[26] = ((frameWidth - 1) >> 16) & 0xFF;
+  u8[27] = (frameHeight - 1) & 0xFF;
+  u8[28] = ((frameHeight - 1) >> 8) & 0xFF;
+  u8[29] = ((frameHeight - 1) >> 16) & 0xFF;
+
+  // フレームデータを丸ごと結合
+  u8.set(frameData, 30);
+  return buffer;
+}
+
+class WebpFallbackDecoder {
+  async init(buffer) {
+    const u8 = new Uint8Array(buffer);
+    const view = new DataView(buffer);
+    let offset = 12;
+
+    this.width = 0;
+    this.height = 0;
+    this.frames = [];
+
+    while (offset < u8.length) {
+      if (offset + 8 > u8.length) break;
+      const chunkId = String.fromCharCode(...u8.subarray(offset, offset + 4));
+      const chunkSize = view.getUint32(offset + 4, true);
+      const chunkDataStart = offset + 8;
+      const chunkDataEnd = chunkDataStart + chunkSize + (chunkSize % 2);
+
+      if (chunkId === 'VP8X') {
+        this.width = (u8[chunkDataStart + 4] | (u8[chunkDataStart + 5] << 8) | (u8[chunkDataStart + 6] << 16)) + 1;
+        this.height = (u8[chunkDataStart + 7] | (u8[chunkDataStart + 8] << 8) | (u8[chunkDataStart + 9] << 16)) + 1;
+      } else if (chunkId === 'ANMF') {
+        const get24 = (off) => u8[off] | (u8[off+1] << 8) | (u8[off+2] << 16);
+        const frameX = get24(chunkDataStart) * 2;
+        const frameY = get24(chunkDataStart + 3) * 2;
+        const frameWidth = get24(chunkDataStart + 6) + 1;
+        const frameHeight = get24(chunkDataStart + 9) + 1;
+        const duration = get24(chunkDataStart + 12);
+        const flags = u8[chunkDataStart + 15];
+        const blendOp = (flags & 2) >> 1; 
+        const disposeOp = flags & 1; 
+        const frameData = u8.subarray(chunkDataStart + 16, chunkDataEnd);
+        
+        this.frames.push({
+          x: frameX, y: frameY, w: frameWidth, h: frameHeight,
+          duration, blendOp, disposeOp, data: frameData
+        });
+      }
+      offset = chunkDataEnd;
+      // ★ 万が一異常なチャンクサイズが指定されて無限ループになるのを防ぐ安全装置
+      if (chunkSize === 0) break; 
+    }
+    
+    this.frameCount = this.frames.length;
+
+    // ★ もしANMFチャンクが1つも見つからなかった場合（静止画WebPだった場合）のフォールバック
+    if (this.frameCount === 0) {
+      console.warn("WebP Demuxer: アニメーションフレームが見つかりませんでした。静止画として処理します。");
+      const blob = new Blob([buffer], { type: 'image/webp' });
+      const bmp = await createImageBitmap(blob);
+      this.width = bmp.width;
+      this.height = bmp.height;
+      this.frameCount = 1;
+      this.staticBmp = bmp;
+      return { width: this.width, height: this.height, frameCount: 1 };
+    }
+
+    this.canvas = new OffscreenCanvas(this.width, this.height);
+    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    this.lastDisposeOp = 0;
+    this.lastRect = null;
+    return { width: this.width, height: this.height, frameCount: this.frameCount };
+  }
+
+  async getFrame(i) {
+    // ★ 静止画としてフォールバックされた場合の処理
+    if (this.staticBmp) {
+      const canvas = new OffscreenCanvas(this.width, this.height);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(this.staticBmp, 0, 0);
+      const imageData = ctx.getImageData(0, 0, this.width, this.height);
+      if (i === 0) this.staticBmp.close(); // 使い終わったら解放
+      return { imageData, durationMs: 0 };
+    }
+
+    const frame = this.frames[i];
+    
+    if (this.lastDisposeOp === 1 && this.lastRect) {
+      this.ctx.clearRect(this.lastRect.x, this.lastRect.y, this.lastRect.w, this.lastRect.h);
+    }
+
+    const staticWebPBuffer = createStaticWebP(frame.w, frame.h, frame.data);
+    const imageDataPatch = await decode(staticWebPBuffer);
+    
+    const tempCanvas = new OffscreenCanvas(frame.w, frame.h);
+    const tempCtx = tempCanvas.getContext('2d');
+    tempCtx.putImageData(imageDataPatch, 0, 0);
+
+    if (frame.blendOp === 1) { 
+      this.ctx.clearRect(frame.x, frame.y, frame.w, frame.h);
+    }
+    this.ctx.drawImage(tempCanvas, frame.x, frame.y);
+
+    this.lastDisposeOp = frame.disposeOp;
+    this.lastRect = { x: frame.x, y: frame.y, w: frame.w, h: frame.h };
+
+    const imageData = this.ctx.getImageData(0, 0, this.width, this.height);
+    return { imageData, durationMs: frame.duration || 100 };
+  }
+}
+
+// 3. GIF JSフォールバック (gifuct-js)
 class GifFallbackDecoder {
   async init(buffer) {
     const gif = parseGIF(buffer);
@@ -172,7 +314,7 @@ class GifFallbackDecoder {
   }
 }
 
-// 3. APNG JSフォールバック (apng-js)
+// 4. APNG JSフォールバック (apng-js)
 class ApngFallbackDecoder {
   async init(buffer) {
     const apng = parseAPNG(buffer);
@@ -223,7 +365,7 @@ class ApngFallbackDecoder {
   }
 }
 
-// 4. 静止画・その他のフォールバック
+// 5. 静止画・その他のフォールバック
 class StaticFallbackDecoder {
   async init(file) {
     const bmp = await createImageBitmap(file);
@@ -243,26 +385,35 @@ class StaticFallbackDecoder {
   }
 }
 
-// ファイル形式の簡易判定
-function getFormatInfo(bytes, mimeType) {
-  if (mimeType === 'image/gif' || (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46)) {
-    return 'gif';
+// ファイル形式のバイナリ判定（拡張子やMIMEタイプに騙されない絶対判定）
+function getFormatInfo(bytes) {
+  // GIF (GIF87a or GIF89a)
+  if (bytes.length >= 3 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+    return { format: 'gif', mimeType: 'image/gif' };
   }
-  if (mimeType === 'image/png' || (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47)) {
+  // PNG / APNG
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
     for (let i = 0; i < Math.min(bytes.length - 4, 1024); i++) {
-      if (bytes[i] === 0x61 && bytes[i+1] === 0x63 && bytes[i+2] === 0x54 && bytes[i+3] === 0x4c) return 'apng';
+      // 'acTL' チャンクを探す
+      if (bytes[i] === 0x61 && bytes[i+1] === 0x63 && bytes[i+2] === 0x54 && bytes[i+3] === 0x4c) {
+        return { format: 'apng', mimeType: 'image/png' };
+      }
     }
-    return 'png';
+    return { format: 'png', mimeType: 'image/png' };
   }
-  if (mimeType === 'image/webp' || (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46)) {
+  // WebP / Animated WebP
+  if (bytes.length >= 4 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
     for (let i = 12; i < Math.min(bytes.length - 4, 256); i++) {
-      if (bytes[i] === 0x41 && bytes[i+1] === 0x4E && bytes[i+2] === 0x49 && bytes[i+3] === 0x4D) return 'animated-webp';
+      // 'ANIM' チャンクを探す
+      if (bytes[i] === 0x41 && bytes[i+1] === 0x4E && bytes[i+2] === 0x49 && bytes[i+3] === 0x4D) {
+        return { format: 'animated-webp', mimeType: 'image/webp' };
+      }
     }
-    return 'webp';
+    return { format: 'webp', mimeType: 'image/webp' };
   }
-  return 'static';
+  // 未知のフォーマット
+  return { format: 'static', mimeType: null };
 }
-
 
 // ==========================================
 // メイン処理キュー
@@ -288,27 +439,30 @@ async function processImage(jobId, file, settings, isFinal) {
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     
-    // ★ Windows環境等でWebPのMIME Typeが空になる現象への対策
-    let mimeType = file.type;
-    if (!mimeType) {
-      const ext = file.name.split('.').pop().toLowerCase();
-      if (ext === 'webp') mimeType = 'image/webp';
-      else if (ext === 'png') mimeType = 'image/png';
-      else if (ext === 'gif') mimeType = 'image/gif';
-      else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
-    }
-
-    const format = getFormatInfo(bytes, mimeType);
+    // ★ ブラウザの申告を無視し、バイナリからフォーマットとMIMEタイプを絶対判定する
+    let { format, mimeType } = getFormatInfo(bytes);
     
-    // ★ 【機能検知】ImageDecoder判定を正常状態に戻す
+    // バイナリ判定できなかった場合のみ、ブラウザの申告（拡張子）に頼る
+    if (!mimeType) {
+      mimeType = file.type;
+      if (!mimeType) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (ext === 'webp') mimeType = 'image/webp';
+        else if (ext === 'png') mimeType = 'image/png';
+        else if (ext === 'gif') mimeType = 'image/gif';
+        else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+      }
+    }
+    
+    // ★ ImageDecoderを意図的にコメントアウトして「Safari環境」をシミュレート
     let useNative = false;
+
     if (typeof ImageDecoder !== 'undefined') {
       try {
         useNative = await ImageDecoder.isTypeSupported(mimeType);
       } catch (e) { useNative = false; }
     }
 
-    // 適切なデコーダを選択
     let decoder;
     if (useNative) {
       try {
@@ -320,8 +474,12 @@ async function processImage(jobId, file, settings, isFinal) {
       }
     }
 
+    // ★ JSフォールバック分岐に WebpFallbackDecoder を追加！
     if (!useNative) {
-      if (format === 'gif') {
+      if (format === 'animated-webp') {
+        decoder = new WebpFallbackDecoder();
+        await decoder.init(buffer);
+      } else if (format === 'gif') {
         decoder = new GifFallbackDecoder();
         await decoder.init(buffer);
       } else if (format === 'apng') {
@@ -357,7 +515,6 @@ async function processImage(jobId, file, settings, isFinal) {
     for (let i = 0; i < frameCount; i++) {
       let { imageData, durationMs } = await decoder.getFrame(i);
 
-      // ★ 背景透過を維持するため JPEG ではなく WebP でプレビュー画像を保持
       const prevCanvas = new OffscreenCanvas(width, height);
       const prevCtx = prevCanvas.getContext('2d', { willReadFrequently: true });
       prevCtx.putImageData(imageData, 0, 0);
@@ -401,7 +558,7 @@ async function processImage(jobId, file, settings, isFinal) {
       frameBlobs = [outputBlob];
     }
 
-    self.postMessage({
+self.postMessage({
       jobId: jobId,
       status: 'success',
       blob: outputBlob,
@@ -412,9 +569,9 @@ async function processImage(jobId, file, settings, isFinal) {
       width: width,
       height: height,
       isAnimated: isAnimated,
-      isFinal: isFinal
+      isFinal: isFinal,
+      detectedFormat: format 
     });
-
   } catch (error) {
     console.error("Worker内エラー:", error);
     self.postMessage({ jobId, status: 'error', message: error.message });

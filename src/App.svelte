@@ -15,6 +15,7 @@
   let isSaving = false;
   
   let resultStats = null;
+  let detectedFormatName = '';
   let worker;
   let currentJobId = 0;
   let debounceTimer;
@@ -106,6 +107,8 @@
           
           if (currentFrame >= processedFramesUrls.length) currentFrame = -1;
 
+detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '';
+
           resultStats = {
             original: data.originalSize,
             processed: data.processedSize,
@@ -190,17 +193,22 @@
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   }
   
-  function getFileFormat(file, isAnimated) {
+function getFileFormat(file, isAnimated) {
     if (!file) return '';
-    const ext = file.name.split('.').pop().toUpperCase();
+    // ★ Workerの判定結果があればそれを優先して表示
+    let format = detectedFormatName; 
     
-    let format = ext;
-    if (file.type === 'image/png') format = 'PNG';
-    else if (file.type === 'image/webp') format = 'WebP';
-    else if (file.type === 'image/gif') format = 'GIF';
-    else if (file.type === 'image/jpeg') format = 'JPEG';
+    // Workerからの返答がない（処理前）場合は拡張子から仮表示
+    if (!format) {
+      format = file.name.split('.').pop().toUpperCase();
+      if (file.type === 'image/png') format = 'PNG';
+      else if (file.type === 'image/webp') format = 'WebP';
+      else if (file.type === 'image/gif') format = 'GIF';
+      else if (file.type === 'image/jpeg') format = 'JPEG';
+    }
 
-    if (isAnimated) {
+    if (format === 'ANIMATED-WEBP') return 'WebP (アニメーション)';
+    if (isAnimated && !format.includes('アニメーション')) {
       return `${format} (アニメーション)`;
     }
     return format;
@@ -230,12 +238,12 @@
 
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- ★ クリック（タップ）でファイル選択を開く処理を追加 -->
-  <div class="dropzone" on:drop={handleDrop} on:dragover|preventDefault on:click={() => fileInput.click()}>
+<div class="dropzone" on:drop={handleDrop} on:dragover|preventDefault on:click={() => fileInput.click()}>
     <p>ここをクリックして画像を選択<br><small>またはドロップ、ペースト(Ctrl+V)</small></p>
     <p class="format-note">
       対応フォーマット: PNG (APNG), GIF, WebP, JPEG<br>
-      上限: サイズ 10 MB / 解像度 2048×2048 px / アニメ 150 コマ
+      上限: サイズ 10 MB / 解像度 2048×2048 px / アニメ 150 コマ<br>
+      展開後の総ピクセル数 5000万 px
     </p>
   </div>
 
