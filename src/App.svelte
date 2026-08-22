@@ -72,7 +72,7 @@
     if (fileInput) fileInput.value = '';
   }
 
-  onMount(() => {
+onMount(() => {
     worker = new Worker(new URL('./imageworker.js', import.meta.url), { type: 'module' });
     
     worker.onmessage = (e) => {
