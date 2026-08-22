@@ -1,0 +1,26 @@
+{
+  "name": "misskey-emoji-compressor",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "rollup": "^4.62.5",
+    "svelte": "^5.56.8",
+    "vite": "^8.2.0",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
+    "@jsquash/webp": "^1.5.0",
+    "imagequant": "^0.1.2"
+  }
+}
