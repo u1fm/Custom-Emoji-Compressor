@@ -412,6 +412,7 @@ async function processImage(jobId, file, settings, isFinal) {
     
     let { format, mimeType } = getFormatInfo(bytes);
     
+// バイナリ判定できなかった場合のみ、ブラウザの申告（拡張子）に頼る
     if (!mimeType) {
       mimeType = file.type;
       if (!mimeType) {
@@ -422,40 +423,21 @@ async function processImage(jobId, file, settings, isFinal) {
         else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
       }
     }
-    
-    let useNative = false;
 
-    if (typeof ImageDecoder !== 'undefined') {
-      try {
-        useNative = await ImageDecoder.isTypeSupported(mimeType);
-      } catch (e) { useNative = false; }
-    }
-
+    // ★ PC・スマホ全環境で、確実に全コマを正確に抽出できるJSフォールバック（自作エンジン）に統一する
     let decoder;
-    if (useNative) {
-      try {
-        decoder = new NativeDecoder();
-        await decoder.init(file, mimeType);
-      } catch (e) {
-        console.warn("ネイティブデコーダ失敗、JSへフォールバック:", e);
-        useNative = false;
-      }
-    }
-
-    if (!useNative) {
-      if (format === 'animated-webp') {
-        decoder = new WebpFallbackDecoder();
-        await decoder.init(buffer);
-      } else if (format === 'gif') {
-        decoder = new GifFallbackDecoder();
-        await decoder.init(buffer);
-      } else if (format === 'apng') {
-        decoder = new ApngFallbackDecoder();
-        await decoder.init(buffer);
-      } else {
-        decoder = new StaticFallbackDecoder();
-        await decoder.init(file);
-      }
+    if (format === 'animated-webp') {
+      decoder = new WebpFallbackDecoder();
+      await decoder.init(buffer);
+    } else if (format === 'gif') {
+      decoder = new GifFallbackDecoder();
+      await decoder.init(buffer);
+    } else if (format === 'apng') {
+      decoder = new ApngFallbackDecoder();
+      await decoder.init(buffer);
+    } else {
+      decoder = new StaticFallbackDecoder();
+      await decoder.init(file);
     }
 
     const { width, height, frameCount } = decoder;
