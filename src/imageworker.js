@@ -1,5 +1,8 @@
 import { ImagequantImage, Imagequant } from 'imagequant';
 import { encode } from '@jsquash/webp';
+import apngjs from 'apng-js';
+const parseAPNG = typeof apngjs === 'function' ? apngjs : apngjs.default;
+import { parseGIF, decompressFrames } from 'gifuct-js';
 
 // ==========================================
 // 自作 WebP Assembler
@@ -92,40 +95,174 @@ function assembleAnimatedWebP(frames, width, height) {
 }
 
 // ==========================================
-// キャッシュ機構
+// デコーダー クラス群 (ストリーミング対応)
 // ==========================================
-let cachedFile = null;
-let cachedAnimInfo = null;
-let cachedFrames = []; 
-let cachedStaticImage = null; 
 
-function isSameFile(f1, f2) {
-  if (!f1 || !f2) return false;
-  return f1.name === f2.name && f1.size === f2.size && f1.lastModified === f2.lastModified;
+// 1. ネイティブ (ImageDecoder API)
+class NativeDecoder {
+  async init(file, mimeType) {
+    // ★ mimeTypeを明示的に指定してエラーを防ぐ
+    this.decoder = new ImageDecoder({ data: file.stream(), type: mimeType });
+    await this.decoder.tracks.ready;
+    const track = this.decoder.tracks[0];
+    this.frameCount = track.frameCount;
+    
+    const result = await this.decoder.decode({ frameIndex: 0 });
+    this.width = result.image.displayWidth;
+    this.height = result.image.displayHeight;
+    result.image.close();
+    
+    this.canvas = new OffscreenCanvas(this.width, this.height);
+    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    return { width: this.width, height: this.height, frameCount: this.frameCount };
+  }
+  
+  async getFrame(i) {
+    const result = await this.decoder.decode({ frameIndex: i });
+    const durationMs = Math.round((result.image.duration || 100000) / 1000);
+    this.ctx.clearRect(0, 0, this.width, this.height);
+    this.ctx.drawImage(result.image, 0, 0);
+    const imageData = this.ctx.getImageData(0, 0, this.width, this.height);
+    result.image.close();
+    return { imageData, durationMs };
+  }
 }
 
-async function checkIsAnimated(file) {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
+// 2. GIF JSフォールバック (gifuct-js)
+class GifFallbackDecoder {
+  async init(buffer) {
+    const gif = parseGIF(buffer);
+    this.frames = decompressFrames(gif, true);
+    this.width = gif.lsd.width;
+    this.height = gif.lsd.height;
+    this.frameCount = this.frames.length;
+    
+    this.canvas = new OffscreenCanvas(this.width, this.height);
+    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    this.backupCanvas = new OffscreenCanvas(this.width, this.height);
+    this.backupCtx = this.backupCanvas.getContext('2d', { willReadFrequently: true });
+    this.lastDisposeOp = 0;
+    this.lastRect = null;
+    return { width: this.width, height: this.height, frameCount: this.frameCount };
+  }
 
-  if (file.type === 'image/gif' || (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46)) {
-    let frameCount = 0;
-    for (let i = 0; i < bytes.length - 2; i++) {
-      if (bytes[i] === 0x21 && bytes[i+1] === 0xF9 && bytes[i+2] === 0x04) {
-        frameCount++;
-        if (frameCount > 1) return { isAnimated: true, type: 'gif' };
-      }
+  async getFrame(i) {
+    const frame = this.frames[i];
+    
+    if (this.lastDisposeOp === 2 && this.lastRect) {
+      this.ctx.clearRect(this.lastRect.x, this.lastRect.y, this.lastRect.w, this.lastRect.h);
+    } else if (this.lastDisposeOp === 3) {
+      this.ctx.putImageData(this.backupImageData, this.lastRect.x, this.lastRect.y);
     }
-  }
-  if (file.type === 'image/png' || (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47)) {
-    for (let i = 0; i < bytes.length - 4; i++) {
-      if (bytes[i] === 0x61 && bytes[i+1] === 0x63 && bytes[i+2] === 0x54 && bytes[i+3] === 0x4c) {
-        return { isAnimated: true, type: 'apng' };
-      }
+
+    if (frame.disposalType === 3) {
+      this.backupImageData = this.ctx.getImageData(frame.dims.left, frame.dims.top, frame.dims.width, frame.dims.height);
     }
+
+    const patchData = new ImageData(new Uint8ClampedArray(frame.patch), frame.dims.width, frame.dims.height);
+    const tempCanvas = new OffscreenCanvas(frame.dims.width, frame.dims.height);
+    tempCanvas.getContext('2d').putImageData(patchData, 0, 0);
+    this.ctx.drawImage(tempCanvas, frame.dims.left, frame.dims.top);
+
+    this.lastDisposeOp = frame.disposalType;
+    this.lastRect = { x: frame.dims.left, y: frame.dims.top, w: frame.dims.width, h: frame.dims.height };
+
+    const imageData = this.ctx.getImageData(0, 0, this.width, this.height);
+    return { imageData, durationMs: frame.delay || 100 };
   }
-  return { isAnimated: false, type: 'static' };
 }
+
+// 3. APNG JSフォールバック (apng-js)
+class ApngFallbackDecoder {
+  async init(buffer) {
+    const apng = parseAPNG(buffer);
+    if (apng instanceof Error) throw new Error(apng.message);
+    this.frames = apng.frames;
+    this.width = apng.width;
+    this.height = apng.height;
+    this.frameCount = this.frames.length;
+    
+    this.canvas = new OffscreenCanvas(this.width, this.height);
+    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    this.backupCanvas = new OffscreenCanvas(this.width, this.height);
+    this.backupCtx = this.backupCanvas.getContext('2d');
+    this.lastDisposeOp = 0;
+    this.lastRect = null;
+    return { width: this.width, height: this.height, frameCount: this.frameCount };
+  }
+
+  async getFrame(i) {
+    const frame = this.frames[i];
+    
+    if (this.lastDisposeOp === 1 && this.lastRect) {
+      this.ctx.clearRect(this.lastRect.x, this.lastRect.y, this.lastRect.w, this.lastRect.h);
+    } else if (this.lastDisposeOp === 2 && this.lastRect) {
+      this.ctx.clearRect(this.lastRect.x, this.lastRect.y, this.lastRect.w, this.lastRect.h);
+      this.ctx.drawImage(this.backupCanvas, 0, 0);
+    }
+
+    if (frame.disposeOp === 2) {
+      this.backupCtx.clearRect(0, 0, this.width, this.height);
+      this.backupCtx.drawImage(this.canvas, 0, 0);
+    }
+
+    const blob = new Blob([frame.imageData], { type: 'image/png' });
+    const bmp = await createImageBitmap(blob);
+
+    if (frame.blendOp === 0) {
+      this.ctx.clearRect(frame.left, frame.top, frame.width, frame.height);
+    }
+    this.ctx.drawImage(bmp, frame.left, frame.top);
+    bmp.close();
+
+    this.lastDisposeOp = frame.disposeOp;
+    this.lastRect = { x: frame.left, y: frame.top, w: frame.width, h: frame.height };
+
+    const imageData = this.ctx.getImageData(0, 0, this.width, this.height);
+    return { imageData, durationMs: frame.delay || 100 };
+  }
+}
+
+// 4. 静止画・その他のフォールバック
+class StaticFallbackDecoder {
+  async init(file) {
+    const bmp = await createImageBitmap(file);
+    this.width = bmp.width;
+    this.height = bmp.height;
+    this.frameCount = 1;
+    this.bmp = bmp;
+    return { width: this.width, height: this.height, frameCount: 1 };
+  }
+  async getFrame() {
+    const canvas = new OffscreenCanvas(this.width, this.height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(this.bmp, 0, 0);
+    const imageData = ctx.getImageData(0, 0, this.width, this.height);
+    this.bmp.close();
+    return { imageData, durationMs: 0 };
+  }
+}
+
+// ファイル形式の簡易判定
+function getFormatInfo(bytes, mimeType) {
+  if (mimeType === 'image/gif' || (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46)) {
+    return 'gif';
+  }
+  if (mimeType === 'image/png' || (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47)) {
+    for (let i = 0; i < Math.min(bytes.length - 4, 1024); i++) {
+      if (bytes[i] === 0x61 && bytes[i+1] === 0x63 && bytes[i+2] === 0x54 && bytes[i+3] === 0x4c) return 'apng';
+    }
+    return 'png';
+  }
+  if (mimeType === 'image/webp' || (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46)) {
+    for (let i = 12; i < Math.min(bytes.length - 4, 256); i++) {
+      if (bytes[i] === 0x41 && bytes[i+1] === 0x4E && bytes[i+2] === 0x49 && bytes[i+3] === 0x4D) return 'animated-webp';
+    }
+    return 'webp';
+  }
+  return 'static';
+}
+
 
 // ==========================================
 // メイン処理キュー
@@ -148,180 +285,133 @@ self.addEventListener('message', (event) => {
 
 async function processImage(jobId, file, settings, isFinal) {
   try {
-    if (typeof ImageDecoder === 'undefined') {
-      throw new Error("お使いのブラウザはネイティブの高度なアニメーション解析に対応していません。ChromeまたはEdgeをご利用ください。");
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    
+    // ★ Windows環境等でWebPのMIME Typeが空になる現象への対策
+    let mimeType = file.type;
+    if (!mimeType) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (ext === 'webp') mimeType = 'image/webp';
+      else if (ext === 'png') mimeType = 'image/png';
+      else if (ext === 'gif') mimeType = 'image/gif';
+      else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
     }
 
-    const isNewFile = !isSameFile(cachedFile, file);
+    const format = getFormatInfo(bytes, mimeType);
+    
+    // ★ 【機能検知】ImageDecoder判定を正常状態に戻す
+    let useNative = false;
+    if (typeof ImageDecoder !== 'undefined') {
+      try {
+        useNative = await ImageDecoder.isTypeSupported(mimeType);
+      } catch (e) { useNative = false; }
+    }
 
-    if (isNewFile) {
-      const animInfo = await checkIsAnimated(file);
-      const decoder = new ImageDecoder({ data: file.stream(), type: file.type });
-      await decoder.tracks.ready;
-      const track = decoder.tracks[0];
-      const isAnimated = track.frameCount > 1;
-
-      // ★【安全装置1】アニメーションのコマ数上限 (150コマ)
-      if (track.frameCount > 150) {
-        throw new Error(`アニメーションのコマ数が多すぎます（上限: 150コマ / 現在: ${track.frameCount}コマ）`);
+    // 適切なデコーダを選択
+    let decoder;
+    if (useNative) {
+      try {
+        decoder = new NativeDecoder();
+        await decoder.init(file, mimeType);
+      } catch (e) {
+        console.warn("ネイティブデコーダ失敗、JSへフォールバック:", e);
+        useNative = false;
       }
+    }
 
-      // ★【安全装置2】静止画・アニメ問わず、1フレーム目をデコードして解像度をチェック
-      const checkResult = await decoder.decode({ frameIndex: 0 });
-      const imgW = checkResult.image.displayWidth;
-      const imgH = checkResult.image.displayHeight;
-      checkResult.image.close(); // すぐに開放
-
-      if (imgW > 2048 || imgH > 2048) {
-        throw new Error(`解像度が大きすぎます（上限: 2048x2048 px / 現在: ${imgW}x${imgH} px）`);
-      }
-
-      // エラーを全てパスした場合のみキャッシュを更新
-      cachedAnimInfo = animInfo;
-
-      if (cachedAnimInfo.isAnimated && isAnimated) {
-        cachedFrames = [];
-        let canvas = null, ctx = null;
-        let width = 0, height = 0;
-
-        for (let i = 0; i < track.frameCount; i++) {
-          const result = await decoder.decode({ frameIndex: i });
-          const image = result.image;
-          const durationMs = Math.round((image.duration || 100000) / 1000);
-
-          if (!canvas) {
-            width = image.displayWidth;
-            height = image.displayHeight;
-            canvas = new OffscreenCanvas(width, height);
-            ctx = canvas.getContext('2d', { willReadFrequently: true });
-          }
-
-          ctx.clearRect(0, 0, width, height);
-          ctx.drawImage(image, 0, 0);
-          
-          const originalBlob = await canvas.convertToBlob({ type: 'image/png' });
-
-          cachedFrames.push({ 
-            durationMs, 
-            imageData: ctx.getImageData(0, 0, width, height), 
-            width, 
-            height,
-            originalBlob
-          });
-          image.close();
-        }
+    if (!useNative) {
+      if (format === 'gif') {
+        decoder = new GifFallbackDecoder();
+        await decoder.init(buffer);
+      } else if (format === 'apng') {
+        decoder = new ApngFallbackDecoder();
+        await decoder.init(buffer);
       } else {
-        const result = await decoder.decode({ frameIndex: 0 });
-        const image = result.image;
-        const width = image.displayWidth;
-        const height = image.displayHeight;
-        
-        const canvas = new OffscreenCanvas(width, height);
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(image, 0, 0);
-        image.close();
-
-        cachedStaticImage = {
-          imageData: ctx.getImageData(0, 0, width, height),
-          width, height
-        };
+        decoder = new StaticFallbackDecoder();
+        await decoder.init(file);
       }
-      
-      // 全てのキャッシュ化が成功したらファイルを記録
-      cachedFile = file;
     }
 
-    let outputBlob;
-    let frameBlobs = []; 
-    const encodeMethod = isFinal ? 6 : 1; 
-    let outWidth = 0;
-    let outHeight = 0;
+    const { width, height, frameCount } = decoder;
+    const isAnimated = frameCount > 1;
 
-    if (cachedAnimInfo.isAnimated && cachedFrames.length > 0) {
-      const processedFrames = [];
-      outWidth = cachedFrames[0].width;
-      outHeight = cachedFrames[0].height;
-      
-      let canvas = new OffscreenCanvas(outWidth, outHeight);
-      let ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const MAX_TOTAL_PIXELS = 50_000_000;
+    if (width * height * frameCount > MAX_TOTAL_PIXELS) {
+      throw new Error(`総ピクセル数が上限(5000万px)を超えています。処理を中断しました。`);
+    }
+    if (frameCount > 150) {
+      throw new Error(`アニメーションのコマ数が多すぎます（上限: 150コマ / 現在: ${frameCount}コマ）`);
+    }
+    if (width > 2048 || height > 2048) {
+      throw new Error(`解像度が大きすぎます（上限: 2048x2048 px / 現在: ${width}x${height} px）`);
+    }
 
-      for (const frame of cachedFrames) {
-        let currentImageData = frame.imageData;
+    const processedFrames = [];
+    const originalFramesPreviews = []; 
+    const encodeMethod = isFinal ? 6 : 1;
+    const iqInstance = settings.mode === 'lossless' && settings.colors < 256 ? new Imagequant() : null;
+    
+    if (iqInstance) iqInstance.set_max_colors(settings.colors);
 
-        if (settings.mode === 'lossless' && settings.colors < 256) {
-          const uint8Array = new Uint8Array(currentImageData.data.buffer);
-          const iqImage = new ImagequantImage(uint8Array, outWidth, outHeight, 0);
-          const instance = new Imagequant();
-          instance.set_max_colors(settings.colors);
-          
-          const output = instance.process(iqImage);
-          const pngBlob = new Blob([output.buffer], { type: "image/png" });
-          const bmp = await createImageBitmap(pngBlob);
-          
-          ctx.clearRect(0, 0, outWidth, outHeight);
-          ctx.drawImage(bmp, 0, 0);
-          currentImageData = ctx.getImageData(0, 0, outWidth, outHeight);
-          bmp.close();
-        }
+    for (let i = 0; i < frameCount; i++) {
+      let { imageData, durationMs } = await decoder.getFrame(i);
 
-        const webpBuffer = await encode(currentImageData, {
-          lossless: settings.mode === 'lossless' ? 1 : 0,
-          quality: settings.mode === 'lossy' ? settings.lossyQuality : 100,
-          method: encodeMethod,
-          exact: 1
-        });
+      // ★ 背景透過を維持するため JPEG ではなく WebP でプレビュー画像を保持
+      const prevCanvas = new OffscreenCanvas(width, height);
+      const prevCtx = prevCanvas.getContext('2d', { willReadFrequently: true });
+      prevCtx.putImageData(imageData, 0, 0);
+      const prevBlob = await prevCanvas.convertToBlob({ type: 'image/webp', quality: 0.8 });
+      originalFramesPreviews.push(prevBlob);
 
-        processedFrames.push({ durationMs: frame.durationMs, webpBuffer });
-      }
-
-      const animatedWebPBuffer = assembleAnimatedWebP(processedFrames, outWidth, outHeight);
-      outputBlob = new Blob([animatedWebPBuffer], { type: 'image/webp' });
-      frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
-
-    } else {
-      outWidth = cachedStaticImage.width;
-      outHeight = cachedStaticImage.height;
-      let currentImageData = cachedStaticImage.imageData;
-
-      if (settings.mode === 'lossless' && settings.colors < 256) {
-        const uint8Array = new Uint8Array(currentImageData.data.buffer);
-        const iqImage = new ImagequantImage(uint8Array, outWidth, outHeight, 0);
-        const instance = new Imagequant();
-        instance.set_max_colors(settings.colors);
+      if (iqInstance) {
+        const uint8Array = new Uint8Array(imageData.data.buffer);
+        const iqImage = new ImagequantImage(uint8Array, width, height, 0);
+        const output = iqInstance.process(iqImage);
         
-        const output = instance.process(iqImage);
         const pngBlob = new Blob([output.buffer], { type: "image/png" });
         const bmp = await createImageBitmap(pngBlob);
         
-        const canvas = new OffscreenCanvas(outWidth, outHeight);
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.clearRect(0, 0, outWidth, outHeight);
-        ctx.drawImage(bmp, 0, 0);
-        currentImageData = ctx.getImageData(0, 0, outWidth, outHeight);
+        const qCanvas = new OffscreenCanvas(width, height);
+        const qCtx = qCanvas.getContext('2d', { willReadFrequently: true });
+        qCtx.clearRect(0, 0, width, height);
+        qCtx.drawImage(bmp, 0, 0);
+        imageData = qCtx.getImageData(0, 0, width, height);
         bmp.close();
       }
 
-      const webpBuffer = await encode(currentImageData, {
+      const webpBuffer = await encode(imageData, {
         lossless: settings.mode === 'lossless' ? 1 : 0,
         quality: settings.mode === 'lossy' ? settings.lossyQuality : 100,
         method: encodeMethod,
         exact: 1
       });
 
-      outputBlob = new Blob([webpBuffer], { type: 'image/webp' });
+      processedFrames.push({ durationMs, webpBuffer });
+    }
+
+    let outputBlob;
+    let frameBlobs = [];
+    if (isAnimated) {
+      const animatedWebPBuffer = assembleAnimatedWebP(processedFrames, width, height);
+      outputBlob = new Blob([animatedWebPBuffer], { type: 'image/webp' });
+      frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
+    } else {
+      outputBlob = new Blob([processedFrames[0].webpBuffer], { type: 'image/webp' });
+      frameBlobs = [outputBlob];
     }
 
     self.postMessage({
       jobId: jobId,
       status: 'success',
       blob: outputBlob,
-      originalFrames: cachedFrames ? cachedFrames.map(f => f.originalBlob) : [], 
+      originalFrames: originalFramesPreviews, 
       processedFrames: frameBlobs, 
       originalSize: file.size,
       processedSize: outputBlob.size,
-      width: outWidth,
-      height: outHeight,
-      isAnimated: cachedAnimInfo.isAnimated,
+      width: width,
+      height: height,
+      isAnimated: isAnimated,
       isFinal: isFinal
     });
 

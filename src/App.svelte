@@ -237,8 +237,6 @@
       対応フォーマット: PNG (APNG), GIF, WebP, JPEG<br>
       上限: サイズ 10 MB / 解像度 2048×2048 px / アニメ 150 コマ
     </p>
-    <!-- ★ 注意書きを追加 -->
-    <p class="safari-warning">※iPhoneやMacのSafariブラウザには対応していません</p>
   </div>
 
   <div class="control-panel">
