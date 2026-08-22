@@ -25,6 +25,9 @@
   let isFreeColorMode = false;
   const colorPresets = [16, 32, 64, 128, 256];
   let presetIndex = 4;
+  
+  // ★ 非表示のファイル選択inputタグを参照するための変数
+  let fileInput;
 
   $: if (!isFreeColorMode) {
     settings.colors = colorPresets[presetIndex];
@@ -45,6 +48,27 @@
     debounceTimer = setTimeout(() => {
       runWorker(false);
     }, 400);
+  }
+
+  function resetState() {
+    currentFile = null;
+    if (originalUrl) URL.revokeObjectURL(originalUrl);
+    originalUrl = null;
+    if (processedUrl) URL.revokeObjectURL(processedUrl);
+    processedUrl = null;
+    
+    originalFramesUrls.forEach(URL.revokeObjectURL);
+    originalFramesUrls = [];
+    processedFramesUrls.forEach(URL.revokeObjectURL);
+    processedFramesUrls = [];
+    
+    currentFrame = -1;
+    zoomedSrc = null;
+    resultStats = null;
+    isProcessing = false;
+    isSaving = false;
+    
+    if (fileInput) fileInput.value = '';
   }
 
   onMount(() => {
@@ -89,28 +113,55 @@
             width: data.width,
             height: data.height
           };
+          
+          isProcessing = false;
         } else {
           console.error("Workerエラー:", data.message);
-          isSaving = false;
+          alert(`処理エラー: ${data.message}`);
+          resetState();
         }
-        isProcessing = false;
       }
     };
   });
 
-  function handleDrop(event) {
-    event.preventDefault();
-    const file = event.dataTransfer.files[0];
+  // ★ 共通のファイル処理関数
+  function processSelectedFile(file) {
     if (!file) return;
 
+    const MAX_FILE_SIZE = 10 * 1024 * 1024;
+    if (file.size > MAX_FILE_SIZE) {
+      alert(`ファイルサイズが大きすぎます（上限: 10MB）。\n現在のサイズ: ${formatSize(file.size)}`);
+      resetState();
+      return;
+    }
+
+    resetState();
     currentFile = file;
-    currentFrame = -1;
-    
-    if (originalUrl) URL.revokeObjectURL(originalUrl);
     originalUrl = URL.createObjectURL(file);
-    resultStats = null;
-    
     runWorker(false);
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    processSelectedFile(event.dataTransfer.files[0]);
+  }
+  
+  // ★ タップ（クリック）でファイル選択ダイアログを開く
+  function handleFileInputChange(event) {
+    processSelectedFile(event.target.files[0]);
+  }
+
+  // ★ クリップボードからのペースト（Ctrl+V）に対応
+  function handlePaste(event) {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    for (let item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        processSelectedFile(file);
+        break; // 最初の画像だけ処理する
+      }
+    }
   }
 
   function runWorker(isFinal = false) {
@@ -162,13 +213,32 @@
   $: sizeDiffPercent = resultStats ? Math.abs(Math.round((1 - resultStats.processed / resultStats.original) * 100)) : 0;
 </script>
 
+<!-- ★ 画面全体のどこでペーストしても反応するように設定 -->
+<svelte:window on:paste={handlePaste} />
+
 <main>
   <h1>カスタム絵文字コンプレッサー</h1>
   
+  <!-- ★ 非表示のファイル選択 input -->
+  <input 
+    type="file" 
+    accept="image/png, image/jpeg, image/webp, image/gif" 
+    bind:this={fileInput} 
+    on:change={handleFileInputChange} 
+    style="display: none;" 
+  />
+
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="dropzone" on:drop={handleDrop} on:dragover|preventDefault>
-    <p>ここに画像をドロップ<br><small>またはペースト</small></p>
-    <p class="format-note">対応フォーマット: PNG (APNG), GIF, WebP, JPEG</p>
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- ★ クリック（タップ）でファイル選択を開く処理を追加 -->
+  <div class="dropzone" on:drop={handleDrop} on:dragover|preventDefault on:click={() => fileInput.click()}>
+    <p>ここをクリックして画像を選択<br><small>またはドロップ、ペースト(Ctrl+V)</small></p>
+    <p class="format-note">
+      対応フォーマット: PNG (APNG), GIF, WebP, JPEG<br>
+      上限: サイズ 10 MB / 解像度 2048×2048 px / アニメ 150 コマ
+    </p>
+    <!-- ★ 注意書きを追加 -->
+    <p class="safari-warning">※iPhoneやMacのSafariブラウザには対応していません</p>
   </div>
 
   <div class="control-panel">
@@ -182,7 +252,7 @@
       </div>
       
       <div class="setting-group limit-settings">
-        <label>目標制限サイズ (KB):</label>
+        <label>目標サイズ (KB):</label>
         <div class="limit-inputs">
           <label class="inline-label">静止画: <input type="number" min="1" bind:value={warningConfig.limitStaticKB} /> KB</label>
           <label class="inline-label">アニメ: <input type="number" min="1" bind:value={warningConfig.limitAnimatedKB} /> KB</label>
@@ -220,7 +290,6 @@
 
   {#if originalUrl}
     <div class="preview-area">
-      <!-- ★「(比較)」を削除 -->
       <h3>プレビュー</h3>
       
       <div class="comparison-container">
@@ -305,7 +374,7 @@
           <p class="notice-text">⚠️ 圧縮後のファイルサイズが元画像よりも増加しています。設定を見直すか、元画像をそのまま使用することをおすすめします。</p>
         {/if}
         {#if isOverLimit}
-          <p class="warning-text">⚠️ 制限サイズ ({limitKB}KB) を超えています。さらに色数や品質を下げてください。</p>
+          <p class="warning-text">⚠️ 目標サイズ ({limitKB}KB) を超えています。さらに色数や品質を下げてください。</p>
         {/if}
       </div>
 
@@ -332,8 +401,14 @@
 
 <style>
   main { max-width: 800px; margin: 2rem auto; font-family: sans-serif; padding: 0 1rem; }
-  .dropzone { border: 2px dashed #aaa; border-radius: 8px; padding: 3rem 1rem; text-align: center; background: #fdfdfd; cursor: pointer; margin-bottom: 1.5rem; }
-  .format-note { color: #666; font-size: 0.85rem; margin-top: 1rem; }
+  /* ★ ドロップエリアのホバーエフェクトなどを追加 */
+  .dropzone { 
+    border: 2px dashed #aaa; border-radius: 8px; padding: 3rem 1rem; text-align: center; 
+    background: #fdfdfd; cursor: pointer; margin-bottom: 1.5rem; transition: background 0.2s; 
+  }
+  .dropzone:hover { background: #f0f8ff; border-color: #007bff; }
+  .format-note { color: #666; font-size: 0.85rem; margin-top: 1rem; line-height: 1.5; }
+  .safari-warning { color: #dc3545; font-size: 0.8rem; font-weight: bold; margin-top: 0.5rem; }
   
   .control-panel { background: #f5f5f5; padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; }
   .setting-row { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }

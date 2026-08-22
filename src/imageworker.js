@@ -155,13 +155,29 @@ async function processImage(jobId, file, settings, isFinal) {
     const isNewFile = !isSameFile(cachedFile, file);
 
     if (isNewFile) {
-      cachedAnimInfo = await checkIsAnimated(file);
-      cachedFile = file;
-
+      const animInfo = await checkIsAnimated(file);
       const decoder = new ImageDecoder({ data: file.stream(), type: file.type });
       await decoder.tracks.ready;
       const track = decoder.tracks[0];
       const isAnimated = track.frameCount > 1;
+
+      // ★【安全装置1】アニメーションのコマ数上限 (150コマ)
+      if (track.frameCount > 150) {
+        throw new Error(`アニメーションのコマ数が多すぎます（上限: 150コマ / 現在: ${track.frameCount}コマ）`);
+      }
+
+      // ★【安全装置2】静止画・アニメ問わず、1フレーム目をデコードして解像度をチェック
+      const checkResult = await decoder.decode({ frameIndex: 0 });
+      const imgW = checkResult.image.displayWidth;
+      const imgH = checkResult.image.displayHeight;
+      checkResult.image.close(); // すぐに開放
+
+      if (imgW > 2048 || imgH > 2048) {
+        throw new Error(`解像度が大きすぎます（上限: 2048x2048 px / 現在: ${imgW}x${imgH} px）`);
+      }
+
+      // エラーを全てパスした場合のみキャッシュを更新
+      cachedAnimInfo = animInfo;
 
       if (cachedAnimInfo.isAnimated && isAnimated) {
         cachedFrames = [];
@@ -210,13 +226,14 @@ async function processImage(jobId, file, settings, isFinal) {
           width, height
         };
       }
+      
+      // 全てのキャッシュ化が成功したらファイルを記録
+      cachedFile = file;
     }
 
     let outputBlob;
     let frameBlobs = []; 
     const encodeMethod = isFinal ? 6 : 1; 
-    
-    // ★確実に変数を定義
     let outWidth = 0;
     let outHeight = 0;
 
@@ -259,7 +276,6 @@ async function processImage(jobId, file, settings, isFinal) {
 
       const animatedWebPBuffer = assembleAnimatedWebP(processedFrames, outWidth, outHeight);
       outputBlob = new Blob([animatedWebPBuffer], { type: 'image/webp' });
-      
       frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
 
     } else {
