@@ -3,6 +3,7 @@ import { encode, decode } from '@jsquash/webp';
 import apngjs from 'apng-js';
 const parseAPNG = typeof apngjs === 'function' ? apngjs : apngjs.default;
 import { parseGIF, decompressFrames } from 'gifuct-js';
+import pica from 'pica';
 
 function assembleAnimatedWebP(frames, width, height) {
   let totalPayloadSize = 0;
@@ -87,7 +88,6 @@ function assembleAnimatedWebP(frames, width, height) {
       offset += 8 + c.size + (c.size % 2);
     }
   }
-
   return buffer;
 }
 
@@ -107,7 +107,6 @@ class NativeDecoder {
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     return { width: this.width, height: this.height, frameCount: this.frameCount };
   }
-  
   async getFrame(i) {
     const result = await this.decoder.decode({ frameIndex: i });
     const durationMs = Math.round((result.image.duration || 100000) / 1000);
@@ -142,7 +141,6 @@ function createStaticWebP(frameWidth, frameHeight, frameData) {
   u8.set([82, 73, 70, 70], 0);
   view.setUint32(4, fileSize, true);
   u8.set([87, 69, 66, 80], 8);
-
   u8.set([86, 80, 56, 88], 12);
   view.setUint32(16, 10, true);
   u8[20] = hasAlpha ? 0x10 : 0x00;
@@ -189,10 +187,7 @@ class WebpFallbackDecoder {
         const disposeOp = flags & 1; 
         const frameData = u8.subarray(chunkDataStart + 16, chunkDataEnd);
         
-        this.frames.push({
-          x: frameX, y: frameY, w: frameWidth, h: frameHeight,
-          duration, blendOp, disposeOp, data: frameData
-        });
+        this.frames.push({ x: frameX, y: frameY, w: frameWidth, h: frameHeight, duration, blendOp, disposeOp, data: frameData });
       }
       offset = chunkDataEnd;
       if (chunkSize === 0) break; 
@@ -201,7 +196,6 @@ class WebpFallbackDecoder {
     this.frameCount = this.frames.length;
 
     if (this.frameCount === 0) {
-      console.warn("WebP Demuxer: アニメーションフレームが見つかりませんでした。静止画として処理します。");
       const blob = new Blob([buffer], { type: 'image/webp' });
       const bmp = await createImageBitmap(blob);
       this.width = bmp.width;
@@ -224,7 +218,7 @@ class WebpFallbackDecoder {
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(this.staticBmp, 0, 0);
       const imageData = ctx.getImageData(0, 0, this.width, this.height);
-      if (i === 0) this.staticBmp.close(); // 使い終わったら解放
+      if (i === 0) this.staticBmp.close();
       return { imageData, durationMs: 0 };
     }
 
@@ -270,7 +264,6 @@ class GifFallbackDecoder {
     this.lastRect = null;
     return { width: this.width, height: this.height, frameCount: this.frameCount };
   }
-
   async getFrame(i) {
     const frame = this.frames[i];
     
@@ -314,7 +307,6 @@ class ApngFallbackDecoder {
     this.lastRect = null;
     return { width: this.width, height: this.height, frameCount: this.frameCount };
   }
-
   async getFrame(i) {
     const frame = this.frames[i];
     
@@ -409,10 +401,8 @@ async function processImage(jobId, file, settings, isFinal) {
   try {
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
-    
     let { format, mimeType } = getFormatInfo(bytes);
     
-// バイナリ判定できなかった場合のみ、ブラウザの申告（拡張子）に頼る
     if (!mimeType) {
       mimeType = file.type;
       if (!mimeType) {
@@ -424,7 +414,6 @@ async function processImage(jobId, file, settings, isFinal) {
       }
     }
 
-    // ★ PC・スマホ全環境で、確実に全コマを正確に抽出できるJSフォールバック（自作エンジン）に統一する
     let decoder;
     if (format === 'animated-webp') {
       decoder = new WebpFallbackDecoder();
@@ -454,6 +443,18 @@ async function processImage(jobId, file, settings, isFinal) {
       throw new Error(`解像度が大きすぎます（上限: 2048x2048 px / 現在: ${width}x${height} px）`);
     }
 
+    // ★ リサイズ後の寸法を計算（縦幅が指定サイズを超えている場合のみ縮小）
+    let outputWidth = width;
+    let outputHeight = height;
+
+    if (settings.isResizeEnabled && height > settings.resizeHeight) {
+      outputHeight = settings.resizeHeight;
+      outputWidth = Math.max(1, Math.round(width * (settings.resizeHeight / height)));
+    }
+
+    // picaのインスタンス作成
+    const picaRunner = pica();
+
     const processedFrames = [];
     const originalFramesPreviews = []; 
     const encodeMethod = isFinal ? 6 : 1;
@@ -464,25 +465,43 @@ async function processImage(jobId, file, settings, isFinal) {
     for (let i = 0; i < frameCount; i++) {
       let { imageData, durationMs } = await decoder.getFrame(i);
 
+      // 元画像のプレビューは縮小「前」の元データから作る
       const prevCanvas = new OffscreenCanvas(width, height);
       const prevCtx = prevCanvas.getContext('2d', { willReadFrequently: true });
       prevCtx.putImageData(imageData, 0, 0);
       const prevBlob = await prevCanvas.convertToBlob({ type: 'image/webp', quality: 0.8 });
       originalFramesPreviews.push(prevBlob);
 
+      // 高画質リサイズ処理の割り込み
+      if (outputWidth !== width || outputHeight !== height) {
+        const sourceCanvas = new OffscreenCanvas(width, height);
+        sourceCanvas.getContext('2d').putImageData(imageData, 0, 0);
+        
+        const resizedCanvas = new OffscreenCanvas(outputWidth, outputHeight);
+        
+        // picaによるランチョス法リサイズ ＋ 軽くアンシャープマスクでぼやけを防ぐ
+        await picaRunner.resize(sourceCanvas, resizedCanvas, {
+          unsharpAmount: 60,
+          unsharpRadius: 0.6,
+          unsharpThreshold: 2
+        });
+        
+        imageData = resizedCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, outputWidth, outputHeight);
+      }
+
       if (iqInstance) {
         const uint8Array = new Uint8Array(imageData.data.buffer);
-        const iqImage = new ImagequantImage(uint8Array, width, height, 0);
+        const iqImage = new ImagequantImage(uint8Array, outputWidth, outputHeight, 0);
         const output = iqInstance.process(iqImage);
         
         const pngBlob = new Blob([output.buffer], { type: "image/png" });
         const bmp = await createImageBitmap(pngBlob);
         
-        const qCanvas = new OffscreenCanvas(width, height);
+        const qCanvas = new OffscreenCanvas(outputWidth, outputHeight);
         const qCtx = qCanvas.getContext('2d', { willReadFrequently: true });
-        qCtx.clearRect(0, 0, width, height);
+        qCtx.clearRect(0, 0, outputWidth, outputHeight);
         qCtx.drawImage(bmp, 0, 0);
-        imageData = qCtx.getImageData(0, 0, width, height);
+        imageData = qCtx.getImageData(0, 0, outputWidth, outputHeight);
         bmp.close();
       }
 
@@ -499,7 +518,8 @@ async function processImage(jobId, file, settings, isFinal) {
     let outputBlob;
     let frameBlobs = [];
     if (isAnimated) {
-      const animatedWebPBuffer = assembleAnimatedWebP(processedFrames, width, height);
+      // 結合処理にも新しいサイズを渡す
+      const animatedWebPBuffer = assembleAnimatedWebP(processedFrames, outputWidth, outputHeight);
       outputBlob = new Blob([animatedWebPBuffer], { type: 'image/webp' });
       frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
     } else {
@@ -507,7 +527,7 @@ async function processImage(jobId, file, settings, isFinal) {
       frameBlobs = [outputBlob];
     }
 
-self.postMessage({
+    self.postMessage({
       jobId: jobId,
       status: 'success',
       blob: outputBlob,
@@ -515,8 +535,10 @@ self.postMessage({
       processedFrames: frameBlobs, 
       originalSize: file.size,
       processedSize: outputBlob.size,
-      width: width,
-      height: height,
+      originalWidth: width,           
+      originalHeight: height,         
+      processedWidth: outputWidth,    
+      processedHeight: outputHeight,  
       isAnimated: isAnimated,
       isFinal: isFinal,
       detectedFormat: format 

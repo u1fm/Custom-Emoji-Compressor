@@ -12,7 +12,7 @@
   let zoomedSrc = null;
   
   let showLicenseModal = false;
-
+  
   let isProcessing = false;
   let isSaving = false;
   
@@ -22,7 +22,14 @@
   let currentJobId = 0;
   let debounceTimer;
 
-  let settings = { mode: 'lossless', colors: 256, lossyQuality: 80 };
+  // リサイズ用の初期設定（isResizeEnabledとresizeHeight）
+  let settings = { 
+    mode: 'lossless', 
+    colors: 256, 
+    lossyQuality: 80, 
+    isResizeEnabled: false, 
+    resizeHeight: 256 
+  };
   let warningConfig = { enabled: true, limitStaticKB: 10, limitAnimatedKB: 64 };
   
   let isFreeColorMode = false;
@@ -73,7 +80,7 @@
     if (fileInput) fileInput.value = '';
   }
 
-onMount(() => {
+  onMount(() => {
     worker = new Worker(new URL('./imageworker.js', import.meta.url), { type: 'module' });
     
     worker.onmessage = (e) => {
@@ -100,7 +107,8 @@ onMount(() => {
 
           if (processedUrl) URL.revokeObjectURL(processedUrl);
           processedUrl = URL.createObjectURL(data.blob);
-
+          
+          // 圧縮完了のタイミングで元画像も再セットし、左右のアニメーションを同期
           if (originalUrl) URL.revokeObjectURL(originalUrl);
           originalUrl = URL.createObjectURL(currentFile);
           
@@ -111,14 +119,16 @@ onMount(() => {
           
           if (currentFrame >= processedFramesUrls.length) currentFrame = -1;
 
-detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '';
+          detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '';
 
           resultStats = {
             original: data.originalSize,
             processed: data.processedSize,
             isAnimated: data.isAnimated,
-            width: data.width,
-            height: data.height
+            originalWidth: data.originalWidth,
+            originalHeight: data.originalHeight,
+            processedWidth: data.processedWidth,
+            processedHeight: data.processedHeight
           };
           
           isProcessing = false;
@@ -133,14 +143,12 @@ detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '
 
   function processSelectedFile(file) {
     if (!file) return;
-
     const MAX_FILE_SIZE = 10 * 1024 * 1024;
     if (file.size > MAX_FILE_SIZE) {
       alert(`ファイルサイズが大きすぎます（上限: 10MB）。\n現在のサイズ: ${formatSize(file.size)}`);
       resetState();
       return;
     }
-
     resetState();
     currentFile = file;
     originalUrl = URL.createObjectURL(file);
@@ -194,7 +202,7 @@ detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   }
   
-function getFileFormat(file, isAnimated) {
+  function getFileFormat(file, isAnimated) {
     if (!file) return '';
     let format = detectedFormatName; 
     
@@ -215,7 +223,6 @@ function getFileFormat(file, isAnimated) {
 
   $: limitKB = resultStats?.isAnimated ? warningConfig.limitAnimatedKB : warningConfig.limitStaticKB;
   $: isOverLimit = resultStats && (resultStats.processed / 1024) > limitKB;
-  
   $: isSizeIncreased = resultStats && resultStats.processed > resultStats.original;
   $: sizeDiffPercent = resultStats ? Math.abs(Math.round((1 - resultStats.processed / resultStats.original) * 100)) : 0;
 </script>
@@ -225,18 +232,11 @@ function getFileFormat(file, isAnimated) {
 <main>
   <h1>カスタム絵文字コンプレッサー</h1>
   
-  <!-- ★ 非表示のファイル選択 input -->
-  <input 
-    type="file" 
-    accept="image/png, image/jpeg, image/webp, image/gif" 
-    bind:this={fileInput} 
-    on:change={handleFileInputChange} 
-    style="display: none;" 
-  />
+  <input type="file" accept="image/png, image/jpeg, image/webp, image/gif" bind:this={fileInput} on:change={handleFileInputChange} style="display: none;" />
 
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <!-- svelte-ignore a11y-click-events-have-key-events -->
-<div class="dropzone" on:drop={handleDrop} on:dragover|preventDefault on:click={() => fileInput.click()}>
+  <div class="dropzone" on:drop={handleDrop} on:dragover|preventDefault on:click={() => fileInput.click()}>
     <p>ここをクリックして画像を選択<br><small>またはドロップ、ペースト(Ctrl+V)</small></p>
     <p class="format-note">
       対応フォーマット: PNG (APNG), GIF, WebP, JPEG<br>
@@ -252,6 +252,15 @@ function getFileFormat(file, isAnimated) {
         <div class="toggle-group">
           <button class:active={settings.mode === 'lossless'} on:click={() => settings.mode = 'lossless'}>可逆 (減色)</button>
           <button class:active={settings.mode === 'lossy'} on:click={() => settings.mode = 'lossy'}>非可逆</button>
+        </div>
+      </div>
+      
+      <!-- ★ 縮小（リサイズ）のオンオフスイッチを追加 -->
+      <div class="setting-group">
+        <label>縮小 (縦幅):</label>
+        <div class="toggle-group">
+          <button class:active={!settings.isResizeEnabled} on:click={() => settings.isResizeEnabled = false}>オフ</button>
+          <button class:active={settings.isResizeEnabled} on:click={() => settings.isResizeEnabled = true}>オン</button>
         </div>
       </div>
       
@@ -273,7 +282,6 @@ function getFileFormat(file, isAnimated) {
             自由選択モード
           </label>
         </div>
-        
         {#if isFreeColorMode}
           <input type="range" min="2" max="256" bind:value={settings.colors} />
           <div class="slider-labels"><span>2</span><span>256</span></div>
@@ -290,22 +298,34 @@ function getFileFormat(file, isAnimated) {
         <input type="range" min="0" max="100" bind:value={settings.lossyQuality} />
       </div>
     {/if}
+
+    <!-- ★ リサイズ設定のUI（オンの時だけ下部に出現） -->
+    {#if settings.isResizeEnabled}
+      <div class="setting-group resize-settings" transition:fade={{duration: 150}}>
+        <div class="label-with-toggle">
+          <label>目標の縦幅: 
+            <input type="number" min="16" max="512" bind:value={settings.resizeHeight} class="inline-number" /> px以下に縮小
+          </label>
+        </div>
+        <input type="range" min="64" max="512" bind:value={settings.resizeHeight} />
+        <div class="slider-labels"><span>64px</span><span>512px</span></div>
+      </div>
+    {/if}
   </div>
 
   {#if originalUrl}
     <div class="preview-area">
       <h3>プレビュー</h3>
-      
       <div class="comparison-container">
-        <!-- 左: 元画像 -->
         <div class="image-box">
           <div class="size-label-container">
             <span class="label-title">オリジナル</span>
             <span class="label-value">{formatSize(currentFile.size)}</span>
             <span class="meta-info">
               {getFileFormat(currentFile, resultStats?.isAnimated)}
-              {#if resultStats?.width}
-                | {resultStats.width} × {resultStats.height} px
+              {#if resultStats?.originalHeight}
+                <!-- ★ 元の解像度を表示（H × W の順） -->
+                | {resultStats.originalHeight} × {resultStats.originalWidth} px
               {/if}
             </span>
           </div>
@@ -323,7 +343,6 @@ function getFileFormat(file, isAnimated) {
           </div>
         </div>
 
-        <!-- 右: 処理後画像 -->
         <div class="image-box">
           <div class="size-label-container">
             <span class="label-title">圧縮後 (プレビュー画質)</span>
@@ -333,6 +352,13 @@ function getFileFormat(file, isAnimated) {
               </span>
               <span class="label-sub" class:text-danger={isSizeIncreased}>
                 ({isSizeIncreased ? `+${sizeDiffPercent}% 増加` : `${sizeDiffPercent}% 削減`})
+              </span>
+              <span class="meta-info">
+                WebP
+                {#if resultStats.processedHeight}
+                  <!-- ★ 処理後の解像度を表示（H × W の順） -->
+                  | {resultStats.processedHeight} × {resultStats.processedWidth} px
+                {/if}
               </span>
             {:else}
               <span class="label-value">計算中...</span>
@@ -363,7 +389,6 @@ function getFileFormat(file, isAnimated) {
             <button class:active={currentFrame === -1} on:click={() => currentFrame = -1}>▶ アニメーション</button>
             <button class:active={currentFrame !== -1} on:click={() => currentFrame = currentFrame === -1 ? 0 : currentFrame}>⏸ コマ送りで比較</button>
           </div>
-          
           {#if currentFrame !== -1}
             <div class="frame-slider">
               <input type="range" min="0" max={processedFramesUrls.length - 1} bind:value={currentFrame} />
@@ -384,11 +409,7 @@ function getFileFormat(file, isAnimated) {
 
       <div class="action-area">
         <button class="download-button" on:click={handleDownloadClick} disabled={isSaving || isProcessing}>
-          {#if isSaving}
-            保存中...
-          {:else}
-            保存
-          {/if}
+          {#if isSaving}保存中...{:else}保存{/if}
         </button>
       </div>
     </div>
@@ -407,7 +428,7 @@ function getFileFormat(file, isAnimated) {
   <p><a href="https://misskey.io/@u1f" target="_blank" rel="noopener noreferrer">Misskey.io account</a></p>
   <p><a href="https://mi.u1f.info/@u1f" target="_blank" rel="noopener noreferrer">Misskey 個人サーバー</a></p>
   <p>製作者 : 葵@u1f</p>
-  <p class="license-link"><button on:click={() => showLicenseModal = true}>ライセンス表記</button></p>
+  <p class="license-link"><button on:click={() => showLicenseModal = true}>オープンソースライセンス表記</button></p>
 </footer>
 
 {#if showLicenseModal}
@@ -417,30 +438,15 @@ function getFileFormat(file, isAnimated) {
     <div class="license-box" on:click|stopPropagation>
       <h2>オープンソースライセンス</h2>
       <p class="license-intro">当ツールは、以下のオープンソースソフトウェアおよびライブラリを利用して構築されています。</p>
-      
       <div class="license-list">
-        <div class="license-item">
-          <strong>Svelte / Vite</strong>
-          <p>MIT License</p>
-        </div>
-        <div class="license-item">
-          <strong>@jsquash/webp</strong>
-          <p>ISC / MIT License</p>
-        </div>
-        <div class="license-item">
-          <strong>apng-js</strong>
-          <p>MIT License</p>
-        </div>
-        <div class="license-item">
-          <strong>gifuct-js</strong>
-          <p>MIT License</p>
-        </div>
-        <div class="license-item">
-          <strong>imagequant (Wasm)</strong>
-          <p>MIT / GPL License</p>
-        </div>
+        <div class="license-item"><strong>Svelte / Vite</strong><p>MIT License</p></div>
+        <div class="license-item"><strong>@jsquash/webp</strong><p>ISC / MIT License</p></div>
+        <div class="license-item"><strong>apng-js</strong><p>MIT License</p></div>
+        <div class="license-item"><strong>gifuct-js</strong><p>MIT License</p></div>
+        <div class="license-item"><strong>imagequant (Wasm)</strong><p>MIT / GPL License</p></div>
+        <!-- ★ picaを追加 -->
+        <div class="license-item"><strong>pica</strong><p>MIT License</p></div>
       </div>
-
       <button class="close-modal-btn" on:click={() => showLicenseModal = false}>閉じる</button>
     </div>
   </div>
@@ -448,13 +454,9 @@ function getFileFormat(file, isAnimated) {
 
 <style>
   main { max-width: 800px; margin: 2rem auto; font-family: sans-serif; padding: 0 1rem; }
-  .dropzone { 
-    border: 2px dashed #aaa; border-radius: 8px; padding: 3rem 1rem; text-align: center; 
-    background: #fdfdfd; cursor: pointer; margin-bottom: 1.5rem; transition: background 0.2s; 
-  }
+  .dropzone { border: 2px dashed #aaa; border-radius: 8px; padding: 3rem 1rem; text-align: center; background: #fdfdfd; cursor: pointer; margin-bottom: 1.5rem; transition: background 0.2s; }
   .dropzone:hover { background: #f0f8ff; border-color: #007bff; }
   .format-note { color: #666; font-size: 0.85rem; margin-top: 1rem; line-height: 1.5; }
-  .safari-warning { color: #dc3545; font-size: 0.8rem; font-weight: bold; margin-top: 0.5rem; }
   
   .control-panel { background: #f5f5f5; padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; }
   .setting-row { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
@@ -473,10 +475,13 @@ function getFileFormat(file, isAnimated) {
   input[type="range"] { width: 100%; margin: 0; }
   .slider-labels { display: flex; justify-content: space-between; margin-top: 4px; padding: 0 5px; font-size: 0.75em; color: #666; }
   
+  .resize-settings { border-top: 1px solid #ddd; padding-top: 1rem; margin-top: 1rem; }
+  .inline-number { width: 70px; text-align: right; padding: 0.25rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; font-size: 0.95rem; }
+
   .preview-area { text-align: center; margin-top: 1rem; }
-  .comparison-container { display: flex; gap: 1rem; justify-content: center; align-items: stretch; margin-top: 1rem; }
-  .image-box { flex: 1; max-width: 48%; display: flex; flex-direction: column; }
-  .size-label-container { height: 4.5rem; display: flex; flex-direction: column; justify-content: flex-end; margin-bottom: 0.5rem; }
+  .comparison-container { display: flex; gap: 1rem; justify-content: center; align-items: flex-start; margin-top: 1rem; }
+  .image-box { flex: 1; width: 48%; display: flex; flex-direction: column; }
+  .size-label-container { height: 5rem; display: flex; flex-direction: column; justify-content: flex-end; margin-bottom: 0.5rem; }
   .label-title { font-size: 0.9em; color: #555; }
   .label-value { font-size: 1.1em; }
   .label-value.highlight { color: #007bff; font-weight: bold; font-size: 1.2em; }
@@ -486,17 +491,13 @@ function getFileFormat(file, isAnimated) {
   .meta-info { font-size: 0.75rem; color: #888; margin-top: 2px; }
   
   .image-container { 
-    flex: 1; position: relative; padding: 1rem; border-radius: 8px; display: flex; justify-content: center; align-items: center;
+    height: 280px;
+    position: relative; padding: 1rem; border-radius: 8px; display: flex; justify-content: center; align-items: center;
     background-color: #e5e5e5;
-    background-image: 
-      linear-gradient(45deg, #d0d0d0 25%, transparent 25%), 
-      linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), 
-      linear-gradient(45deg, transparent 75%, #d0d0d0 75%), 
-      linear-gradient(-45deg, transparent 75%, #d0d0d0 75%);
-    background-size: 20px 20px;
-    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+    background-image: linear-gradient(45deg, #d0d0d0 25%, transparent 25%), linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d0d0d0 75%), linear-gradient(-45deg, transparent 75%, #d0d0d0 75%);
+    background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
   }
-  .image-container img { max-width: 100%; max-height: 256px; transition: opacity 0.2s; }
+  .image-container img { max-width: 100%; max-height: 100%; object-fit: contain; transition: opacity 0.2s; }
   .image-container img.processing { opacity: 0.5; }
   .zoomable { cursor: zoom-in; }
   
@@ -518,108 +519,22 @@ function getFileFormat(file, isAnimated) {
   .download-button:hover:not(:disabled) { background: #218838; transform: translateY(-2px); }
   .download-button:disabled { background: #6c757d; cursor: not-allowed; }
   
-  .zoom-modal {
-    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-    background: rgba(0, 0, 0, 0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; cursor: zoom-out;
-  }
-  .zoom-modal img {
-    max-width: 90vw; max-height: 90vh; object-fit: contain; box-shadow: 0 0 20px rgba(0,0,0,0.5);
-    background-color: #e5e5e5;
-    background-image: linear-gradient(45deg, #d0d0d0 25%, transparent 25%), linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d0d0d0 75%), linear-gradient(-45deg, transparent 75%, #d0d0d0 75%);
-    background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-  }
+  .zoom-modal { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0, 0, 0, 0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; cursor: zoom-out; }
+  .zoom-modal img { max-width: 90vw; max-height: 90vh; object-fit: contain; box-shadow: 0 0 20px rgba(0,0,0,0.5); background-color: #e5e5e5; background-image: linear-gradient(45deg, #d0d0d0 25%, transparent 25%), linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d0d0d0 75%), linear-gradient(-45deg, transparent 75%, #d0d0d0 75%); background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px; }
 
-footer {
-    text-align: center;
-    margin-top: 3rem;
-    padding-bottom: 2rem;
-    color: #666;
-    font-size: 0.95rem;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif;
-  }
-  footer a {
-    color: #007bff;
-    text-decoration: none;
-    font-weight: bold;
-    transition: color 0.2s;
-  }
-  footer a:hover {
-    color: #0056b3;
-    text-decoration: underline;
-  }
-  .license-link {
-    margin-top: 0.5rem;
-  }
-  .license-link button {
-    background: none;
-    border: none;
-    color: #6c757d;
-    font-size: 0.85rem;
-    cursor: pointer;
-    text-decoration: underline;
-    padding: 0;
-  }
-  .license-link button:hover {
-    color: #007bff;
-  }
-
-  .license-box {
-    background: white;
-    padding: 2rem;
-    border-radius: 8px;
-    max-width: 500px;
-    width: 90%;
-    max-height: 80vh;
-    overflow-y: auto;
-    text-align: left;
-    color: #333;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-  }
-  .license-box h2 {
-    margin-top: 0;
-    font-size: 1.25rem;
-    border-bottom: 2px solid #eee;
-    padding-bottom: 0.5rem;
-  }
-  .license-intro {
-    font-size: 0.9rem;
-    color: #666;
-    margin-bottom: 1rem;
-  }
-  .license-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    margin-bottom: 1.5rem;
-  }
-  .license-item {
-    background: #f8f9fa;
-    padding: 0.75rem;
-    border-radius: 6px;
-    border: 1px solid #e9ecef;
-  }
-  .license-item strong {
-    font-size: 0.95rem;
-    color: #007bff;
-  }
-  .license-item p {
-    margin: 0.25rem 0 0 0;
-    font-size: 0.85rem;
-    color: #555;
-  }
-  .close-modal-btn {
-    display: block;
-    width: 100%;
-    background: #007bff;
-    color: white;
-    border: none;
-    padding: 0.75rem;
-    border-radius: 4px;
-    font-weight: bold;
-    cursor: pointer;
-    text-align: center;
-  }
-  .close-modal-btn:hover {
-    background: #0056b3;
-  }
+  footer { text-align: center; margin-top: 3rem; padding-bottom: 2rem; color: #666; font-size: 0.95rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif; }
+  footer a { color: #007bff; text-decoration: none; font-weight: bold; transition: color 0.2s; }
+  footer a:hover { color: #0056b3; text-decoration: underline; }
+  .license-link { margin-top: 0.5rem; }
+  .license-link button { background: none; border: none; color: #6c757d; font-size: 0.85rem; cursor: pointer; text-decoration: underline; padding: 0; }
+  .license-link button:hover { color: #007bff; }
+  .license-box { background: white; padding: 2rem; border-radius: 8px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; text-align: left; color: #333; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+  .license-box h2 { margin-top: 0; font-size: 1.25rem; border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }
+  .license-intro { font-size: 0.9rem; color: #666; margin-bottom: 1rem; }
+  .license-list { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem; }
+  .license-item { background: #f8f9fa; padding: 0.75rem; border-radius: 6px; border: 1px solid #e9ecef; }
+  .license-item strong { font-size: 0.95rem; color: #007bff; }
+  .license-item p { margin: 0.25rem 0 0 0; font-size: 0.85rem; color: #555; }
+  .close-modal-btn { display: block; width: 100%; background: #007bff; color: white; border: none; padding: 0.75rem; border-radius: 4px; font-weight: bold; cursor: pointer; text-align: center; }
+  .close-modal-btn:hover { background: #0056b3; }
 </style>

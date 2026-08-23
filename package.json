@@ -24,6 +24,7 @@
     "@jsquash/webp": "^1.5.0",
     "apng-js": "^1.1.5",
     "gifuct-js": "^2.1.2",
-    "imagequant": "^0.1.2"
+    "imagequant": "^0.1.2",
+    "pica": "^10.0.3"
   }
 }
