@@ -100,6 +100,9 @@ onMount(() => {
 
           if (processedUrl) URL.revokeObjectURL(processedUrl);
           processedUrl = URL.createObjectURL(data.blob);
+
+          if (originalUrl) URL.revokeObjectURL(originalUrl);
+          originalUrl = URL.createObjectURL(currentFile);
           
           originalFramesUrls.forEach(URL.revokeObjectURL);
           processedFramesUrls.forEach(URL.revokeObjectURL);
