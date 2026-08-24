@@ -49,7 +49,47 @@
   
   let fileInput;
 
-  // ★ 最適化2: effectiveDurations の計算を二重ループ(O(n^2))から後方1回走査(O(n))へ変更
+  // --- タイムラインシーク（時間ベース）用の状態管理 ---
+  let currentTimeMs = 0;
+
+  $: accumulatedTimes = originalDurations.reduce((acc, dur, i) => {
+    if (i === 0) acc.push(0);
+    else acc.push(acc[i - 1] + originalDurations[i - 1]);
+    return acc;
+  }, []);
+
+  $: totalDuration = originalDurations.reduce((a, b) => a + b, 0);
+
+  // 時間(ms)スライダーを動かした時に、現在のオリジナルコマ番号を逆算して同期させる
+  function syncFrameFromTime() {
+    if (accumulatedTimes.length === 0) return;
+    let idx = accumulatedTimes.findIndex((startTime, i) => {
+      const endTime = startTime + originalDurations[i];
+      return currentTimeMs >= startTime && currentTimeMs < endTime;
+    });
+    if (idx === -1) idx = accumulatedTimes.length - 1; 
+    currentFrame = idx;
+  }
+
+  // アニメーション再生ループ等でコマが進んだ時に、時間を同期させる
+  function syncTimeFromFrame() {
+    if (currentFrame >= 0 && currentFrame < accumulatedTimes.length) {
+      currentTimeMs = accumulatedTimes[currentFrame];
+    }
+  }
+
+  // 現在の「圧縮後のコマ位置」を計算する処理
+  $: currentProcessedFrameIndex = (() => {
+    if (currentFrame === -1 || !frameControls || frameControls.length === 0) return currentFrame + 1;
+    let count = 0;
+    for (let i = 0; i <= currentFrame; i++) {
+      if (frameControls[i] && frameControls[i].state === 'keep') {
+        count++;
+      }
+    }
+    return Math.max(1, count);
+  })();
+
   $: effectiveDurations = (() => {
     const result = new Array(frameControls.length);
     let absorbedAfter = 0;
@@ -134,7 +174,8 @@
     
     clearInterval(syncInterval);
     syncTrigger = 0;
-
+    
+    currentTimeMs = 0;
     currentFrame = -1;
     zoomedSrc = null;
     resultStats = null;
@@ -176,12 +217,15 @@
           
           if (!data.isTimelineEdit) {
             revokeAll(originalFramesUrls);
-            revokeAll(processedFramesUrls);
             originalFramesUrls = data.originalFrames ? data.originalFrames.map(b => URL.createObjectURL(b)) : [];
-            processedFramesUrls = data.processedFrames ? data.processedFrames.map(b => URL.createObjectURL(b)) : [];
           }
+          revokeAll(processedFramesUrls);
+          processedFramesUrls = data.processedFrames ? data.processedFrames.map(b => URL.createObjectURL(b)) : [];
           
-          if (currentFrame >= originalFramesUrls.length) currentFrame = -1;
+          if (currentFrame >= originalFramesUrls.length) {
+            currentFrame = -1;
+            currentTimeMs = 0;
+          }
 
           if (data.originalDurations && !data.isTimelineEdit) {
             originalDurations = data.originalDurations;
@@ -216,7 +260,6 @@
     };
   });
 
-  // ★ 破棄時のメモリリーク対策を追加
   onDestroy(() => {
     clearTimeout(debounceTimer);
     clearInterval(syncInterval);
@@ -290,12 +333,12 @@
       syncInterval = setInterval(() => {
         if (currentFrame === -1 && !isProcessing) {
           syncTrigger++; 
+          syncTimeFromFrame();
         }
       }, totalOriginalDuration);
     }
   }
 
-  // ★ プレビューのURLを算出するロジック
   $: originalPreviewSrc = currentFrame === -1 ? originalUrl : (originalFramesUrls[currentFrame] || originalUrl);
   
   function getPreviewFrameUrl(origIndex) {
@@ -317,7 +360,6 @@
   
   $: processedPreviewSrc = currentFrame === -1 ? (processedUrl || originalUrl) : getPreviewFrameUrl(currentFrame);
 
-  // ★ 最適化3: {#key} 破棄によるチラつきを廃止し、画像タグのsrcを一瞬空にして同期させる軽量処理へ
   let origImg1, procImg1, origImg2, procImg2;
   $: if (settings.syncPreviewLoop && syncTrigger > 0) {
     [origImg1, procImg1, origImg2, procImg2].forEach(img => {
@@ -328,9 +370,6 @@
       }
     });
   }
-
-  // --- コマ編集UI用のアクション関数 ---
-  // ★ 最適化4: 配列全体を.map()で作り直すのをやめ、直接ミューテート（書き換え）に変更
 
   function toggleFrameState(index, event) {
     if (event.shiftKey && lastClickedFrame !== -1 && lastClickedFrame !== index) {
@@ -346,7 +385,7 @@
       frameControls[index].state = next;
       lastClickedFrame = index;
     }
-    frameControls = frameControls; // Svelteに更新を通知
+    frameControls = frameControls; 
     scheduleWorker(true);
   }
 
@@ -411,8 +450,6 @@
     frameControls = frameControls;
     scheduleWorker(true);
   }
-
-  // -----------------------------------
 
   function formatSize(bytes) {
     if (bytes === undefined || bytes === 0) return '0 B';
@@ -603,7 +640,13 @@
         <div class="frame-controls">
           <div class="frame-buttons">
             <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
-            <button class:active={currentFrame !== -1} on:click={() => { currentFrame = currentFrame === -1 ? 0 : currentFrame; clearInterval(syncInterval); }}>⏸ コマ送りで比較</button>
+            <button class:active={currentFrame !== -1} on:click={() => { 
+              if (currentFrame === -1) {
+                currentFrame = 0;
+                if (accumulatedTimes.length > 0) currentTimeMs = accumulatedTimes[0];
+              }
+              clearInterval(syncInterval); 
+            }}>⏸ コマ送りで比較</button>
           </div>
           
           <div class="sync-option-row">
@@ -613,10 +656,17 @@
             </label>
           </div>
 
+          <!-- ★ トグルを廃止し、時間(ms)ベースの滑らかなシークバーに一本化 ＆ 情報を常時併記 -->
           {#if currentFrame !== -1}
             <div class="frame-slider">
-              <input type="range" min="0" max={originalFramesUrls.length - 1} bind:value={currentFrame} />
-              <span class="frame-counter">{currentFrame + 1} / {originalFramesUrls.length} コマ目</span>
+              <input type="range" min="0" max={totalDuration > 0 ? totalDuration - 1 : 0} bind:value={currentTimeMs} on:input={syncFrameFromTime} />
+              <span class="frame-counter">
+                {currentTimeMs} / {totalDuration} ms
+                <span class="separator">|</span>
+                オリジナル: {currentFrame + 1} / {originalFramesUrls.length} コマ
+                <span class="separator">|</span>
+                圧縮後: {currentProcessedFrameIndex} / {Math.max(1, processedFramesUrls.length)} コマ
+              </span>
             </div>
           {/if}
           
@@ -650,14 +700,13 @@
 
   {#if zoomedSrc}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div class="zoom-modal" on:click={() => zoomedSrc = null} transition:fade={{ duration: 150 }}>
       <img src={zoomedSrc} alt="拡大プレビュー" draggable="false" on:contextmenu|preventDefault />
     </div>
   {/if}
 </main>
 
-<!-- 全画面モーダル型タイムラインエディタ -->
 {#if isEditorOpen && resultStats?.isAnimated && originalDurations.length > 1}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -740,7 +789,13 @@
           <div class="frame-controls">
             <div class="frame-buttons">
               <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
-              <button class:active={currentFrame !== -1} on:click={() => { currentFrame = currentFrame === -1 ? 0 : currentFrame; clearInterval(syncInterval); }}>⏸ コマ送りで比較</button>
+              <button class:active={currentFrame !== -1} on:click={() => { 
+                if (currentFrame === -1) {
+                  currentFrame = 0;
+                  if (accumulatedTimes.length > 0) currentTimeMs = accumulatedTimes[0];
+                }
+                clearInterval(syncInterval); 
+              }}>⏸ コマ送りで比較</button>
             </div>
             <div class="sync-option-row">
               <label class="sync-checkbox-wrapper">
@@ -748,10 +803,18 @@
                 <span>ループを同期</span>
               </label>
             </div>
+
+            <!-- ★ モーダル内のスライダーも時間ベースに一本化 ＆ 情報併記 -->
             {#if currentFrame !== -1}
               <div class="frame-slider">
-                <input type="range" min="0" max={originalFramesUrls.length - 1} bind:value={currentFrame} />
-                <span class="frame-counter">{currentFrame + 1} / {originalFramesUrls.length} コマ目</span>
+                <input type="range" min="0" max={totalDuration > 0 ? totalDuration - 1 : 0} bind:value={currentTimeMs} on:input={syncFrameFromTime} />
+                <span class="frame-counter">
+                  {currentTimeMs} / {totalDuration} ms
+                  <span class="separator">|</span>
+                  オリジナル: {currentFrame + 1} / {originalFramesUrls.length} コマ
+                  <span class="separator">|</span>
+                  圧縮後: {currentProcessedFrameIndex} / {Math.max(1, processedFramesUrls.length)} コマ
+                </span>
               </div>
             {/if}
           </div>
@@ -916,7 +979,9 @@
     background-image: linear-gradient(45deg, #d0d0d0 25%, transparent 25%), linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d0d0d0 75%), linear-gradient(-45deg, transparent 75%, #d0d0d0 75%);
     background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
   }
-  .image-container img { max-width: 100%; max-height: 100%; object-fit: contain; transition: opacity 0.2s; }
+  .image-container img { 
+    width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; transition: opacity 0.2s; 
+  }
   .image-container img.processing { opacity: 0.5; }
   .zoomable { cursor: zoom-in; }
   
@@ -931,6 +996,8 @@
 
   .frame-slider { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; margin-bottom: 1rem;}
   .frame-counter { font-size: 0.9em; font-weight: bold; color: #555; }
+  .sub-counter { color: #888; margin-left: 4px; }
+  .separator { color: #ccc; margin: 0 0.5rem; }
 
   .editor-toggle-area { margin-top: 0.5rem; text-align: center; border-top: 1px dashed #ccc; padding-top: 1.5rem; }
   .editor-toggle-btn { background: #f0f0f0; border: 1px solid #ccc; padding: 0.5rem 1.5rem; border-radius: 20px; font-size: 0.9rem; cursor: pointer; color: #333; transition: all 0.2s; font-weight: bold; }

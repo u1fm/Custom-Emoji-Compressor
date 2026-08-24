@@ -473,7 +473,6 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
         let { imageData, durationMs } = await decoder.getFrame(i);
         globalCache.originalDurations.push(durationMs); 
 
-        // ★ 最適化1: タイムライン用の画像を長辺160px程度の極小サムネイルとして生成しメモリを劇的に節約
         const sourceCanvas = new OffscreenCanvas(width, height);
         sourceCanvas.getContext('2d', { willReadFrequently: true }).putImageData(imageData, 0, 0);
 
@@ -577,13 +576,12 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
       const previewBuffer = assembleAnimatedWebP(processedFrames, globalCache.outputWidth, globalCache.outputHeight, previewLoopCount);
       previewBlob = new Blob([previewBuffer], { type: 'image/webp' });
 
-      if (!isTimelineEdit) {
-        frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
-      }
+      // ★ 修正: タイムライン編集時（コマ数が変わった時）も、コマ送り比較用にフレームごとのBlobを常に返す
+      frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
     } else {
       outputBlob = new Blob([processedFrames[0].webpBuffer], { type: 'image/webp' });
       previewBlob = outputBlob;
-      if (!isTimelineEdit) frameBlobs = [outputBlob];
+      frameBlobs = [outputBlob];
     }
 
     self.postMessage({
@@ -591,7 +589,7 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
       status: 'success',
       blob: isFinal ? outputBlob : previewBlob,
       originalFrames: isTimelineEdit ? null : globalCache.originalFramesPreviews, 
-      processedFrames: isTimelineEdit ? null : frameBlobs, 
+      processedFrames: frameBlobs, // ★ isTimelineEdit の時も常に返す
       originalDurations: globalCache.originalDurations,
       originalSize: file.size,
       processedSize: outputBlob.size, 
