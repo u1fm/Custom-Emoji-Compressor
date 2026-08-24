@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { fade } from 'svelte/transition';
 
   let currentFile = null;
@@ -12,6 +12,8 @@
   let zoomedSrc = null;
   
   let showLicenseModal = false;
+  let showBatchDurationModal = false;
+  let batchDurationValue = 100;
   
   let isProcessing = false;
   let isSaving = false;
@@ -22,21 +24,63 @@
   let currentJobId = 0;
   let debounceTimer;
 
-  // リサイズ用の初期設定（isResizeEnabledとresizeHeight）
   let settings = { 
     mode: 'lossless', 
     colors: 256, 
     lossyQuality: 80, 
     isResizeEnabled: false, 
-    resizeHeight: 256 
+    resizeHeight: 256,
+    syncPreviewLoop: true 
   };
   let warningConfig = { enabled: true, limitStaticKB: 10, limitAnimatedKB: 64 };
   
+  let isEditorOpen = false; 
+  let originalDurations = []; 
+  let frameControls = []; 
+  let frameViewMode = 'grid'; 
+  let lastClickedFrame = -1;
+  
+  let syncTrigger = 0;
+  let syncInterval = null;
+
   let isFreeColorMode = false;
   const colorPresets = [16, 32, 64, 128, 256];
   let presetIndex = 4;
   
   let fileInput;
+
+  // ★ 最適化2: effectiveDurations の計算を二重ループ(O(n^2))から後方1回走査(O(n))へ変更
+  $: effectiveDurations = (() => {
+    const result = new Array(frameControls.length);
+    let absorbedAfter = 0;
+
+    for (let i = frameControls.length - 1; i >= 0; i--) {
+      const control = frameControls[i];
+      if (!control) {
+        result[i] = originalDurations[i] || 0;
+        continue;
+      }
+      
+      const base = control.customDuration !== null ? control.customDuration : originalDurations[i];
+
+      if (control.state === 'absorb') {
+        absorbedAfter += base;
+        result[i] = 0;
+        continue;
+      }
+
+      if (control.state === 'discard') {
+        absorbedAfter = 0;
+        result[i] = 0;
+        continue;
+      }
+
+      result[i] = base + absorbedAfter;
+      absorbedAfter = 0;
+    }
+
+    return result;
+  })();
 
   $: if (!isFreeColorMode) {
     settings.colors = colorPresets[presetIndex];
@@ -45,18 +89,29 @@
   function handleModeToggle(e) {
     isFreeColorMode = e.target.checked;
     if (!isFreeColorMode) {
-      const closest = colorPresets.reduce((a, b) => 
-        Math.abs(b - settings.colors) < Math.abs(a - settings.colors) ? b : a
-      );
+      const closest = colorPresets.reduce((a, b) => Math.abs(b - settings.colors) < Math.abs(a - settings.colors) ? b : a);
       presetIndex = colorPresets.indexOf(closest);
     }
   }
 
-  $: if (currentFile && settings) {
+  let pendingTimelineEdit = false;
+  
+  function scheduleWorker(isTimelineEdit = false) {
+    if (isTimelineEdit) pendingTimelineEdit = true;
     clearTimeout(debounceTimer);
+    const delay = pendingTimelineEdit ? 100 : 400; 
     debounceTimer = setTimeout(() => {
-      runWorker(false);
-    }, 400);
+      runWorker(false, pendingTimelineEdit);
+      pendingTimelineEdit = false; 
+    }, delay);
+  }
+
+  $: if (currentFile && settings) {
+    scheduleWorker(false);
+  }
+
+  function revokeAll(urls) {
+    if (urls) urls.forEach(u => URL.revokeObjectURL(u));
   }
 
   function resetState() {
@@ -66,11 +121,20 @@
     if (processedUrl) URL.revokeObjectURL(processedUrl);
     processedUrl = null;
     
-    originalFramesUrls.forEach(URL.revokeObjectURL);
+    revokeAll(originalFramesUrls);
     originalFramesUrls = [];
-    processedFramesUrls.forEach(URL.revokeObjectURL);
+    revokeAll(processedFramesUrls);
     processedFramesUrls = [];
     
+    isEditorOpen = false;
+    showBatchDurationModal = false;
+    originalDurations = [];
+    frameControls = [];
+    lastClickedFrame = -1;
+    
+    clearInterval(syncInterval);
+    syncTrigger = 0;
+
     currentFrame = -1;
     zoomedSrc = null;
     resultStats = null;
@@ -105,19 +169,28 @@
             return;
           }
 
+          if (originalUrl) URL.revokeObjectURL(originalUrl);
           if (processedUrl) URL.revokeObjectURL(processedUrl);
+          originalUrl = URL.createObjectURL(currentFile);
           processedUrl = URL.createObjectURL(data.blob);
           
-          // 圧縮完了のタイミングで元画像も再セットし、左右のアニメーションを同期
-          if (originalUrl) URL.revokeObjectURL(originalUrl);
-          originalUrl = URL.createObjectURL(currentFile);
+          if (!data.isTimelineEdit) {
+            revokeAll(originalFramesUrls);
+            revokeAll(processedFramesUrls);
+            originalFramesUrls = data.originalFrames ? data.originalFrames.map(b => URL.createObjectURL(b)) : [];
+            processedFramesUrls = data.processedFrames ? data.processedFrames.map(b => URL.createObjectURL(b)) : [];
+          }
           
-          originalFramesUrls.forEach(URL.revokeObjectURL);
-          processedFramesUrls.forEach(URL.revokeObjectURL);
-          originalFramesUrls = data.originalFrames ? data.originalFrames.map(b => URL.createObjectURL(b)) : [];
-          processedFramesUrls = data.processedFrames ? data.processedFrames.map(b => URL.createObjectURL(b)) : [];
+          if (currentFrame >= originalFramesUrls.length) currentFrame = -1;
+
+          if (data.originalDurations && !data.isTimelineEdit) {
+            originalDurations = data.originalDurations;
+            if (frameControls.length !== originalDurations.length) {
+              frameControls = originalDurations.map(() => ({ state: 'keep', customDuration: null }));
+            }
+          }
           
-          if (currentFrame >= processedFramesUrls.length) currentFrame = -1;
+          startSyncLoop();
 
           detectedFormatName = data.detectedFormat ? data.detectedFormat.toUpperCase() : '';
 
@@ -128,7 +201,9 @@
             originalWidth: data.originalWidth,
             originalHeight: data.originalHeight,
             processedWidth: data.processedWidth,
-            processedHeight: data.processedHeight
+            processedHeight: data.processedHeight,
+            originalFrameCount: data.originalFrames ? data.originalFrames.length : (resultStats?.originalFrameCount || 1),
+            processedFrameCount: data.processedFrames ? data.processedFrames.length : (resultStats?.processedFrameCount || 1)
           };
           
           isProcessing = false;
@@ -139,6 +214,17 @@
         }
       }
     };
+  });
+
+  // ★ 破棄時のメモリリーク対策を追加
+  onDestroy(() => {
+    clearTimeout(debounceTimer);
+    clearInterval(syncInterval);
+    if (originalUrl) URL.revokeObjectURL(originalUrl);
+    if (processedUrl) URL.revokeObjectURL(processedUrl);
+    revokeAll(originalFramesUrls);
+    revokeAll(processedFramesUrls);
+    if (worker) worker.terminate();
   });
 
   function processSelectedFile(file) {
@@ -176,7 +262,7 @@
     }
   }
 
-  function runWorker(isFinal = false) {
+  function runWorker(isFinal = false, isTimelineEdit = false) {
     if (!currentFile || !worker) return;
     if (isFinal) isSaving = true;
     else isProcessing = true;
@@ -185,14 +271,148 @@
     worker.postMessage({
       jobId: currentJobId,
       file: currentFile,
-      settings: { ...settings },
-      isFinal: isFinal
+      settings: { ...settings, frameControls: frameControls },
+      isFinal: isFinal,
+      isTimelineEdit: isTimelineEdit 
     });
   }
 
   function handleDownloadClick() {
     runWorker(true);
   }
+
+  function startSyncLoop() {
+    clearInterval(syncInterval);
+    if (!settings.syncPreviewLoop) return;
+    
+    const totalOriginalDuration = originalDurations.reduce((a, b) => a + b, 0);
+    if (totalOriginalDuration > 0) {
+      syncInterval = setInterval(() => {
+        if (currentFrame === -1 && !isProcessing) {
+          syncTrigger++; 
+        }
+      }, totalOriginalDuration);
+    }
+  }
+
+  // ★ プレビューのURLを算出するロジック
+  $: originalPreviewSrc = currentFrame === -1 ? originalUrl : (originalFramesUrls[currentFrame] || originalUrl);
+  
+  function getPreviewFrameUrl(origIndex) {
+    if (!processedFramesUrls || processedFramesUrls.length === 0) return processedUrl || originalUrl;
+    if (frameControls && frameControls.length > 0) {
+      let keepCount = 0;
+      for (let i = 0; i <= origIndex; i++) {
+        if (frameControls[i] && frameControls[i].state === 'keep') {
+          keepCount++;
+        }
+      }
+      let previewIndex = Math.max(0, keepCount - 1);
+      previewIndex = Math.min(previewIndex, processedFramesUrls.length - 1);
+      return processedFramesUrls[previewIndex];
+    }
+    let safeIndex = Math.min(origIndex, processedFramesUrls.length - 1);
+    return processedFramesUrls[safeIndex];
+  }
+  
+  $: processedPreviewSrc = currentFrame === -1 ? (processedUrl || originalUrl) : getPreviewFrameUrl(currentFrame);
+
+  // ★ 最適化3: {#key} 破棄によるチラつきを廃止し、画像タグのsrcを一瞬空にして同期させる軽量処理へ
+  let origImg1, procImg1, origImg2, procImg2;
+  $: if (settings.syncPreviewLoop && syncTrigger > 0) {
+    [origImg1, procImg1, origImg2, procImg2].forEach(img => {
+      if (img && img.src) {
+        const s = img.src;
+        img.src = '';
+        setTimeout(() => { if (img) img.src = s; }, 10);
+      }
+    });
+  }
+
+  // --- コマ編集UI用のアクション関数 ---
+  // ★ 最適化4: 配列全体を.map()で作り直すのをやめ、直接ミューテート（書き換え）に変更
+
+  function toggleFrameState(index, event) {
+    if (event.shiftKey && lastClickedFrame !== -1 && lastClickedFrame !== index) {
+      let start = Math.min(lastClickedFrame, index);
+      let end = Math.max(lastClickedFrame, index);
+      let targetState = frameControls[lastClickedFrame].state;
+      for (let j = start; j <= end; j++) {
+        frameControls[j].state = targetState;
+      }
+    } else {
+      let current = frameControls[index].state;
+      let next = current === 'keep' ? 'absorb' : (current === 'absorb' ? 'discard' : 'keep');
+      frameControls[index].state = next;
+      lastClickedFrame = index;
+    }
+    frameControls = frameControls; // Svelteに更新を通知
+    scheduleWorker(true);
+  }
+
+  function applyBatchState(action) {
+    for (let i = 0; i < frameControls.length; i++) {
+      if (action === 'all_keep') frameControls[i].state = 'keep';
+      else if (action === 'all_discard') frameControls[i].state = 'discard';
+      else if (action === 'even_absorb' && i % 2 !== 0) {
+        if (frameControls[i].state !== 'discard') frameControls[i].state = 'absorb';
+      }
+      else if (action === 'odd_absorb' && i % 2 === 0) {
+        if (frameControls[i].state !== 'discard') frameControls[i].state = 'absorb';
+      }
+    }
+    frameControls = frameControls;
+    scheduleWorker(true);
+  }
+
+  function applyBatchDuration() {
+    let num = parseInt(batchDurationValue, 10);
+    if (isNaN(num)) num = null;
+    else if (num < 11) num = 11;
+    
+    for (let i = 0; i < frameControls.length; i++) {
+      frameControls[i].customDuration = num;
+    }
+    frameControls = frameControls;
+    scheduleWorker(true);
+    showBatchDurationModal = false;
+  }
+
+  function trimBefore(targetIndex) {
+    for (let i = 0; i < targetIndex; i++) {
+      frameControls[i].state = 'discard';
+    }
+    frameControls = frameControls;
+    scheduleWorker(true);
+  }
+
+  function trimAfter(targetIndex) {
+    for (let i = targetIndex + 1; i < frameControls.length; i++) {
+      frameControls[i].state = 'discard';
+    }
+    frameControls = frameControls;
+    scheduleWorker(true);
+  }
+
+  function handleEffectiveDurationChange(index, value) {
+    let num = parseInt(value, 10);
+    if (isNaN(num)) {
+      frameControls[index].customDuration = null;
+    } else {
+      if (num < 11) num = 11;
+      let absorbedTime = 0;
+      for (let j = index + 1; j < frameControls.length; j++) {
+        if (frameControls[j].state === 'absorb') {
+           absorbedTime += (frameControls[j].customDuration !== null ? frameControls[j].customDuration : originalDurations[j]);
+        } else break;
+      }
+      frameControls[index].customDuration = Math.max(0, num - absorbedTime);
+    }
+    frameControls = frameControls;
+    scheduleWorker(true);
+  }
+
+  // -----------------------------------
 
   function formatSize(bytes) {
     if (bytes === undefined || bytes === 0) return '0 B';
@@ -205,7 +425,6 @@
   function getFileFormat(file, isAnimated) {
     if (!file) return '';
     let format = detectedFormatName; 
-    
     if (!format) {
       format = file.name.split('.').pop().toUpperCase();
       if (file.type === 'image/png') format = 'PNG';
@@ -213,7 +432,6 @@
       else if (file.type === 'image/gif') format = 'GIF';
       else if (file.type === 'image/jpeg') format = 'JPEG';
     }
-
     if (format === 'ANIMATED-WEBP') return 'WebP (アニメーション)';
     if (isAnimated && !format.includes('アニメーション')) {
       return `${format} (アニメーション)`;
@@ -255,7 +473,6 @@
         </div>
       </div>
       
-      <!-- ★ 縮小（リサイズ）のオンオフスイッチを追加 -->
       <div class="setting-group">
         <label>縮小 (縦幅):</label>
         <div class="toggle-group">
@@ -299,7 +516,6 @@
       </div>
     {/if}
 
-    <!-- ★ リサイズ設定のUI（オンの時だけ下部に出現） -->
     {#if settings.isResizeEnabled}
       <div class="setting-group resize-settings" transition:fade={{duration: 150}}>
         <div class="label-with-toggle">
@@ -314,8 +530,9 @@
   </div>
 
   {#if originalUrl}
-    <div class="preview-area">
+    <div class="preview-area" transition:fade={{duration: 150}}>
       <h3>プレビュー</h3>
+      
       <div class="comparison-container">
         <div class="image-box">
           <div class="size-label-container">
@@ -324,21 +541,21 @@
             <span class="meta-info">
               {getFileFormat(currentFile, resultStats?.isAnimated)}
               {#if resultStats?.originalHeight}
-                <!-- ★ 元の解像度を表示（H × W の順） -->
                 | {resultStats.originalHeight} × {resultStats.originalWidth} px
+              {/if}
+              {#if resultStats?.isAnimated && resultStats?.originalFrameCount}
+                | {resultStats.originalFrameCount} コマ
               {/if}
             </span>
           </div>
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
-            <img 
-              src={currentFrame === -1 ? originalUrl : originalFramesUrls[currentFrame]} 
-              alt="元画像" 
-              class="zoomable"
-              draggable="false" 
+            <img bind:this={origImg1}
+              src={originalPreviewSrc} 
+              alt="元画像" class="zoomable" draggable="false" 
               on:contextmenu|preventDefault
-              on:click={() => zoomedSrc = (currentFrame === -1 ? originalUrl : originalFramesUrls[currentFrame])} 
+              on:click={() => zoomedSrc = originalPreviewSrc} 
             />
           </div>
         </div>
@@ -356,8 +573,10 @@
               <span class="meta-info">
                 WebP
                 {#if resultStats.processedHeight}
-                  <!-- ★ 処理後の解像度を表示（H × W の順） -->
                   | {resultStats.processedHeight} × {resultStats.processedWidth} px
+                {/if}
+                {#if resultStats?.isAnimated && resultStats?.processedFrameCount}
+                  | {resultStats.processedFrameCount} コマ
                 {/if}
               </span>
             {:else}
@@ -367,14 +586,11 @@
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
-            <img 
-              src={currentFrame === -1 ? (processedUrl || originalUrl) : processedFramesUrls[currentFrame]} 
-              alt="プレビュー" 
-              class="zoomable" 
-              class:processing={isProcessing}
-              draggable="false" 
+            <img bind:this={procImg1}
+              src={processedPreviewSrc} 
+              alt="プレビュー" class="zoomable" class:processing={isProcessing} draggable="false" 
               on:contextmenu|preventDefault
-              on:click={() => zoomedSrc = (currentFrame === -1 ? (processedUrl || originalUrl) : processedFramesUrls[currentFrame])}
+              on:click={() => zoomedSrc = processedPreviewSrc}
             />
             {#if isProcessing}
               <div class="loading-overlay">処理中...</div>
@@ -386,13 +602,29 @@
       {#if resultStats?.isAnimated && processedFramesUrls.length > 0}
         <div class="frame-controls">
           <div class="frame-buttons">
-            <button class:active={currentFrame === -1} on:click={() => currentFrame = -1}>▶ アニメーション</button>
-            <button class:active={currentFrame !== -1} on:click={() => currentFrame = currentFrame === -1 ? 0 : currentFrame}>⏸ コマ送りで比較</button>
+            <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
+            <button class:active={currentFrame !== -1} on:click={() => { currentFrame = currentFrame === -1 ? 0 : currentFrame; clearInterval(syncInterval); }}>⏸ コマ送りで比較</button>
           </div>
+          
+          <div class="sync-option-row">
+            <label class="sync-checkbox-wrapper">
+              <input type="checkbox" bind:checked={settings.syncPreviewLoop} />
+              <span>ループを同期</span>
+            </label>
+          </div>
+
           {#if currentFrame !== -1}
             <div class="frame-slider">
-              <input type="range" min="0" max={processedFramesUrls.length - 1} bind:value={currentFrame} />
-              <span class="frame-counter">{currentFrame + 1} / {processedFramesUrls.length} コマ目</span>
+              <input type="range" min="0" max={originalFramesUrls.length - 1} bind:value={currentFrame} />
+              <span class="frame-counter">{currentFrame + 1} / {originalFramesUrls.length} コマ目</span>
+            </div>
+          {/if}
+          
+          {#if originalDurations.length > 1}
+            <div class="editor-toggle-area">
+              <button class="editor-toggle-btn" on:click={() => isEditorOpen = true}>
+                ▼ タイムライン編集を開く (コマ間引き/尺調整)
+              </button>
             </div>
           {/if}
         </div>
@@ -412,6 +644,7 @@
           {#if isSaving}保存中...{:else}保存{/if}
         </button>
       </div>
+      
     </div>
   {/if}
 
@@ -424,11 +657,197 @@
   {/if}
 </main>
 
+<!-- 全画面モーダル型タイムラインエディタ -->
+{#if isEditorOpen && resultStats?.isAnimated && originalDurations.length > 1}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="editor-modal-backdrop" transition:fade={{ duration: 150 }}>
+    <div class="editor-modal-content">
+      
+      <div class="modal-top-section">
+        <div class="editor-modal-header">
+          <h2>タイムライン編集</h2>
+          <button class="modal-close-x" on:click={() => isEditorOpen = false}>✕ 閉じて戻る</button>
+        </div>
+        
+        <div class="comparison-container">
+          <div class="image-box">
+            <div class="size-label-container">
+              <span class="label-title">オリジナル</span>
+              <span class="label-value">{formatSize(currentFile.size)}</span>
+              <span class="meta-info">
+                {getFileFormat(currentFile, resultStats?.isAnimated)}
+                {#if resultStats?.originalHeight}
+                  | {resultStats.originalHeight} × {resultStats.originalWidth} px
+                {/if}
+                {#if resultStats?.isAnimated && resultStats?.originalFrameCount}
+                  | {resultStats.originalFrameCount} コマ
+                {/if}
+              </span>
+            </div>
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+            <div class="image-container">
+              <img bind:this={origImg2}
+                src={originalPreviewSrc} 
+                alt="元画像" class="zoomable" draggable="false" 
+                on:contextmenu|preventDefault
+                on:click={() => zoomedSrc = originalPreviewSrc} 
+              />
+            </div>
+          </div>
+
+          <div class="image-box">
+            <div class="size-label-container">
+              <span class="label-title">圧縮後 (プレビュー画質)</span>
+              {#if resultStats}
+                <span class="label-value highlight" class:text-danger={isOverLimit || isSizeIncreased}>
+                  {formatSize(resultStats.processed)}
+                </span>
+                <span class="label-sub" class:text-danger={isSizeIncreased}>
+                  ({isSizeIncreased ? `+${sizeDiffPercent}% 増加` : `${sizeDiffPercent}% 削減`})
+                </span>
+                <span class="meta-info">
+                  WebP
+                  {#if resultStats.processedHeight}
+                    | {resultStats.processedHeight} × {resultStats.processedWidth} px
+                  {/if}
+                  {#if resultStats?.isAnimated && resultStats?.processedFrameCount}
+                    | {resultStats.processedFrameCount} コマ
+                  {/if}
+                </span>
+              {:else}
+                <span class="label-value">計算中...</span>
+              {/if}
+            </div>
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+            <div class="image-container">
+              <img bind:this={procImg2}
+                src={processedPreviewSrc} 
+                alt="プレビュー" class="zoomable" class:processing={isProcessing} draggable="false" 
+                on:contextmenu|preventDefault
+                on:click={() => zoomedSrc = processedPreviewSrc}
+              />
+              {#if isProcessing}
+                <div class="loading-overlay">処理中...</div>
+              {/if}
+            </div>
+          </div>
+        </div>
+        
+        {#if resultStats?.isAnimated && processedFramesUrls.length > 0}
+          <div class="frame-controls">
+            <div class="frame-buttons">
+              <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
+              <button class:active={currentFrame !== -1} on:click={() => { currentFrame = currentFrame === -1 ? 0 : currentFrame; clearInterval(syncInterval); }}>⏸ コマ送りで比較</button>
+            </div>
+            <div class="sync-option-row">
+              <label class="sync-checkbox-wrapper">
+                <input type="checkbox" bind:checked={settings.syncPreviewLoop} />
+                <span>ループを同期</span>
+              </label>
+            </div>
+            {#if currentFrame !== -1}
+              <div class="frame-slider">
+                <input type="range" min="0" max={originalFramesUrls.length - 1} bind:value={currentFrame} />
+                <span class="frame-counter">{currentFrame + 1} / {originalFramesUrls.length} コマ目</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+
+      <div class="modal-bottom-section">
+        <div class="editor-header">
+          <h3>コマごとの詳細設定</h3>
+          <span class="editor-hint">※画像クリックで状態切替 / Shift+クリックで範囲選択</span>
+        </div>
+        
+        <div class="editor-toolbar">
+          <div class="view-toggles">
+            <button class:active={frameViewMode === 'strip'} on:click={() => frameViewMode = 'strip'}>ストリップ</button>
+            <button class:active={frameViewMode === 'grid'} on:click={() => frameViewMode = 'grid'}>グリッド</button>
+          </div>
+          <div class="batch-actions">
+            <button on:click={() => applyBatchState('even_absorb')} title="偶数コマを間引き(時間吸収)状態にします">偶数間引き</button>
+            <button on:click={() => applyBatchState('odd_absorb')} title="奇数コマを間引き(時間吸収)状態にします">奇数間引き</button>
+            <button on:click={() => applyBatchState('all_keep')} title="すべてのコマを有効状態に戻します">全リセット</button>
+            <button on:click={() => showBatchDurationModal = true} title="すべてのコマの表示時間を一括で変更します">⏱ 時間一括設定</button>
+          </div>
+        </div>
+
+        <div class="frame-container {frameViewMode}">
+          {#each originalFramesUrls as url, i (i)}
+            <div class="frame-item" class:discard={frameControls[i].state === 'discard'} class:absorb={frameControls[i].state === 'absorb'}>
+              <!-- svelte-ignore a11y-click-events-have-key-events -->
+              <!-- svelte-ignore a11y-no-static-element-interactions -->
+              <div class="frame-image-wrapper" on:click={(e) => toggleFrameState(i, e)} title="クリックで切替 / Shift+クリックで範囲選択">
+                <img src={url} alt="コマ {i+1}" draggable="false" loading="lazy" decoding="async" />
+                
+                {#if frameControls[i].state === 'absorb'}
+                  <div class="state-overlay absorb">
+                    <span class="icon">⏬</span>
+                    <span class="text">吸収</span>
+                  </div>
+                {:else if frameControls[i].state === 'discard'}
+                  <div class="state-overlay discard">
+                    <span class="icon">✖</span>
+                    <span class="text">カット</span>
+                  </div>
+                {/if}
+                
+                <span class="frame-number">{i + 1}</span>
+              </div>
+
+              <div class="frame-controls-box">
+                <div class="trim-controls">
+                  <button on:click={() => trimBefore(i)} title="ここより前のコマを全てカットします">◀ ｶｯﾄ</button>
+                  <button on:click={() => trimAfter(i)} title="ここより後のコマを全てカットします">ｶｯﾄ ▶</button>
+                </div>
+                <div class="duration-control">
+                  <input 
+                    type="number" min="11" step="1" 
+                    value={frameControls[i].state === 'keep' ? effectiveDurations[i] : 0} 
+                    disabled={frameControls[i].state !== 'keep'}
+                    on:change={(e) => handleEffectiveDurationChange(i, e.target.value)}
+                    title={frameControls[i].state !== 'keep' ? "間引き・カットされたコマは時間設定できません" : "表示時間(ミリ秒)を手動上書き (最小11ms)"}
+                  /> <small>ms</small>
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showBatchDurationModal}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="zoom-modal" on:click={() => showBatchDurationModal = false} transition:fade={{ duration: 150 }}>
+    <div class="license-box" on:click|stopPropagation>
+      <h2>表示時間の一括設定</h2>
+      <p class="license-intro">すべてのコマの表示時間(ミリ秒)を同じ値に上書きします。<br>※最小11ms。空欄のまま適用すると元の長さにリセットされます。</p>
+      
+      <div class="batch-duration-input-wrapper">
+        <input type="number" min="11" step="1" bind:value={batchDurationValue} placeholder="リセット" /> <span>ms</span>
+      </div>
+      
+      <div class="modal-buttons">
+        <button class="modal-btn cancel" on:click={() => showBatchDurationModal = false}>キャンセル</button>
+        <button class="modal-btn apply" on:click={applyBatchDuration}>適用する</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <footer>
   <p><a href="https://misskey.io/@u1f" target="_blank" rel="noopener noreferrer">Misskey.io account</a></p>
   <p><a href="https://mi.u1f.info/@u1f" target="_blank" rel="noopener noreferrer">Misskey 個人サーバー</a></p>
   <p>製作者 : 葵@u1f</p>
-  <p class="license-link"><button on:click={() => showLicenseModal = true}>オープンソースライセンス表記</button></p>
+  <p class="license-link"><button on:click={() => showLicenseModal = true}>クレジット / ライセンス</button></p>
 </footer>
 
 {#if showLicenseModal}
@@ -436,15 +855,15 @@
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div class="zoom-modal" on:click={() => showLicenseModal = false} transition:fade={{ duration: 150 }}>
     <div class="license-box" on:click|stopPropagation>
-      <h2>オープンソースライセンス</h2>
-      <p class="license-intro">当ツールは、以下のオープンソースソフトウェアおよびライブラリを利用して構築されています。</p>
+      <h2>クレジット / ライセンス</h2>
+      <p class="license-intro">当ツールは、以下の素晴らしいツールやオープンソースライブラリを利用して構築されています。</p>
       <div class="license-list">
+        <div class="license-item"><strong>アイコン作成: EmoteLab</strong><p>感謝の意を表します。</p></div>
         <div class="license-item"><strong>Svelte / Vite</strong><p>MIT License</p></div>
         <div class="license-item"><strong>@jsquash/webp</strong><p>ISC / MIT License</p></div>
         <div class="license-item"><strong>apng-js</strong><p>MIT License</p></div>
         <div class="license-item"><strong>gifuct-js</strong><p>MIT License</p></div>
         <div class="license-item"><strong>imagequant (Wasm)</strong><p>MIT / GPL License</p></div>
-        <!-- ★ picaを追加 -->
         <div class="license-item"><strong>pica</strong><p>MIT License</p></div>
       </div>
       <button class="close-modal-btn" on:click={() => showLicenseModal = false}>閉じる</button>
@@ -481,14 +900,14 @@
   .preview-area { text-align: center; margin-top: 1rem; }
   .comparison-container { display: flex; gap: 1rem; justify-content: center; align-items: flex-start; margin-top: 1rem; }
   .image-box { flex: 1; width: 48%; display: flex; flex-direction: column; }
-  .size-label-container { height: 5rem; display: flex; flex-direction: column; justify-content: flex-end; margin-bottom: 0.5rem; }
+  .size-label-container { height: 5.5rem; display: flex; flex-direction: column; justify-content: flex-end; margin-bottom: 0.5rem; }
   .label-title { font-size: 0.9em; color: #555; }
   .label-value { font-size: 1.1em; }
   .label-value.highlight { color: #007bff; font-weight: bold; font-size: 1.2em; }
   .label-value.text-danger { color: #dc3545; }
   .label-sub { font-size: 0.8em; color: #666; }
   .label-sub.text-danger { color: #dc3545; font-weight: bold; }
-  .meta-info { font-size: 0.75rem; color: #888; margin-top: 2px; }
+  .meta-info { font-size: 0.75rem; color: #888; margin-top: 2px; line-height: 1.4; }
   
   .image-container { 
     height: 280px;
@@ -502,25 +921,120 @@
   .zoomable { cursor: zoom-in; }
   
   .frame-controls { margin-top: 1.5rem; padding: 1rem; background: #fdfdfd; border: 1px solid #ddd; border-radius: 8px; }
-  .frame-buttons { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 1rem; }
+  .frame-buttons { display: flex; gap: 0.5rem; justify-content: center; margin-bottom: 0.5rem; flex-wrap: wrap; align-items: center; }
   .frame-buttons button { padding: 0.5rem 1.5rem; border: 1px solid #ccc; background: white; cursor: pointer; border-radius: 4px; font-weight: bold; }
   .frame-buttons button.active { background: #6c757d; color: white; border-color: #6c757d; }
-  .frame-slider { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; }
+  
+  .sync-option-row { text-align: center; margin-bottom: 1rem; }
+  .sync-checkbox-wrapper { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.9rem; cursor: pointer; user-select: none; color: #555; }
+  .sync-checkbox-wrapper input { cursor: pointer; }
+
+  .frame-slider { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; margin-bottom: 1rem;}
   .frame-counter { font-size: 0.9em; font-weight: bold; color: #555; }
+
+  .editor-toggle-area { margin-top: 0.5rem; text-align: center; border-top: 1px dashed #ccc; padding-top: 1.5rem; }
+  .editor-toggle-btn { background: #f0f0f0; border: 1px solid #ccc; padding: 0.5rem 1.5rem; border-radius: 20px; font-size: 0.9rem; cursor: pointer; color: #333; transition: all 0.2s; font-weight: bold; }
+  .editor-toggle-btn:hover { background: #e0e0e0; }
+  .editor-toggle-btn.active { background: #007bff; color: white; border-color: #007bff; }
+
+  .editor-modal-backdrop {
+    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(0, 0, 0, 0.85); 
+    display: flex; justify-content: center; align-items: center; z-index: 1000;
+  }
+  .editor-modal-content {
+    background: #f8f9fa;
+    width: 98vw; max-width: 1200px; height: 96vh;
+    border-radius: 12px; display: flex; flex-direction: column;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: hidden;
+  }
+  .modal-top-section {
+    padding: 1rem 1.5rem; background: white; border-bottom: 1px solid #ddd;
+    display: flex; flex-direction: column; gap: 0.5rem;
+    overflow-y: auto; flex-shrink: 0;
+  }
+  .modal-bottom-section {
+    padding: 1rem 1.5rem; flex: 1; overflow-y: auto; display: flex; flex-direction: column;
+  }
+  .editor-modal-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;
+  }
+  .editor-modal-header h2 { margin: 0; font-size: 1.4rem; color: #333; }
+  .modal-close-x {
+    background: #6c757d; color: white; border: none; padding: 0.5rem 1.5rem; border-radius: 6px; font-weight: bold; cursor: pointer; transition: background 0.2s; font-size: 1rem;
+  }
+  .modal-close-x:hover { background: #5a6268; }
+
+  .modal-top-section .image-container {
+    height: 192px; min-height: 192px;
+  }
+
+  .editor-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;}
+  .editor-header h3 { margin: 0; font-size: 1.1rem; }
+  .editor-hint { font-size: 0.8rem; color: #666; }
+  
+  .editor-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+  .view-toggles button, .batch-actions button { padding: 0.4rem 0.8rem; background: white; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  .view-toggles button.active, .batch-actions button:active { background: #007bff; color: white; border-color: #007bff; }
+  .batch-actions button:hover:not(:active) { background: #e9ecef; }
+  .view-toggles, .batch-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+
+  .frame-container { transition: opacity 0.2s; }
+  .frame-container.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+  .frame-container.strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 10px; }
+  @media (max-width: 600px) {
+    .frame-container.strip { flex-direction: column; overflow-x: hidden; overflow-y: auto; max-height: 450px; }
+    .frame-container.strip .frame-item { flex-direction: row; align-items: center; width: 100%; box-sizing: border-box; }
+    .frame-container.strip .frame-image-wrapper { width: 90px; height: 90px; flex-shrink: 0; }
+    .frame-container.strip .frame-controls-box { margin-left: 15px; flex: 1; display: flex; flex-direction: column; justify-content: center;}
+  }
+
+  .frame-item { 
+    background: white; border: 1px solid #ddd; border-radius: 6px; padding: 6px; display: flex; flex-direction: column; gap: 6px; 
+    content-visibility: auto; contain-intrinsic-size: 110px 180px;
+  }
+  .frame-image-wrapper { position: relative; cursor: pointer; background: #e5e5e5; border-radius: 4px; overflow: hidden; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; user-select: none; }
+  .frame-image-wrapper img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  
+  .state-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: white; font-weight: bold; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+  .state-overlay .icon { font-size: 1.5rem; line-height: 1; margin-bottom: 2px; }
+  .state-overlay .text { font-size: 0.75rem; }
+  .state-overlay.absorb { background: rgba(255, 170, 0, 0.6); } 
+  .state-overlay.discard { background: rgba(220, 53, 69, 0.6); } 
+  
+  .frame-number { position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.6); color: white; font-size: 0.7rem; padding: 2px 6px; border-radius: 10px; line-height: 1; pointer-events: none;}
+  
+  .frame-controls-box { display: flex; flex-direction: column; gap: 4px; }
+  .trim-controls { display: flex; justify-content: space-between; gap: 4px; }
+  .trim-controls button { flex: 1; font-size: 0.7rem; padding: 3px 0; border: 1px solid #ccc; background: #f8f9fa; border-radius: 3px; cursor: pointer; color: #555; }
+  .trim-controls button:hover { background: #e2e6ea; color: #000; }
+  
+  .duration-control { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; color: #555; background: #f5f5f5; border-radius: 3px; padding: 2px 4px; border: 1px solid #eee; }
+  .duration-control input { width: 50px; padding: 2px 4px; text-align: right; border: 1px solid #ccc; border-radius: 3px; font-size: 0.8rem;}
+  .duration-control input:disabled { background: #e9ecef; cursor: not-allowed; }
   
   .loading-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); color: white; padding: 0.5rem 1rem; border-radius: 4px; font-weight: bold; }
   
-  .warnings-container { margin-top: 1.5rem; }
-  .warning-text { color: #dc3545; font-weight: bold; margin: 0.5rem 0; font-size: 0.95rem; }
-  .notice-text { color: #000; font-weight: bold; margin: 0.5rem 0; font-size: 0.95rem; }
+  .warnings-container { margin: 1rem 0; text-align: center; }
+  .warning-text { color: #dc3545; font-weight: bold; margin: 0 0 0.5rem 0; font-size: 0.95rem; }
+  .notice-text { color: #000; font-weight: bold; margin: 0 0 0.5rem 0; font-size: 0.95rem; }
 
-  .action-area { margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #eee; }
+  .action-area { margin-top: 1rem; margin-bottom: 0.5rem; display: flex; justify-content: center; }
   .download-button { background: #28a745; color: white; border: none; padding: 1rem 4rem; font-size: 1.2rem; font-weight: bold; border-radius: 50px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.2s; }
   .download-button:hover:not(:disabled) { background: #218838; transform: translateY(-2px); }
   .download-button:disabled { background: #6c757d; cursor: not-allowed; }
   
   .zoom-modal { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0, 0, 0, 0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; cursor: zoom-out; }
   .zoom-modal img { max-width: 90vw; max-height: 90vh; object-fit: contain; box-shadow: 0 0 20px rgba(0,0,0,0.5); background-color: #e5e5e5; background-image: linear-gradient(45deg, #d0d0d0 25%, transparent 25%), linear-gradient(-45deg, #d0d0d0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d0d0d0 75%), linear-gradient(-45deg, transparent 75%, #d0d0d0 75%); background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px; }
+
+  .batch-duration-input-wrapper { margin: 1.5rem 0; text-align: center; font-size: 1.2rem; }
+  .batch-duration-input-wrapper input { width: 100px; padding: 0.5rem; font-size: 1.1rem; text-align: right; border: 1px solid #ccc; border-radius: 4px; }
+  .modal-buttons { display: flex; gap: 1rem; }
+  .modal-btn { flex: 1; padding: 0.75rem; border-radius: 4px; font-weight: bold; cursor: pointer; border: none; color: white; transition: background 0.2s; }
+  .modal-btn.cancel { background: #6c757d; }
+  .modal-btn.cancel:hover { background: #5a6268; }
+  .modal-btn.apply { background: #007bff; }
+  .modal-btn.apply:hover { background: #0056b3; }
 
   footer { text-align: center; margin-top: 3rem; padding-bottom: 2rem; color: #666; font-size: 0.95rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif; }
   footer a { color: #007bff; text-decoration: none; font-weight: bold; transition: color 0.2s; }

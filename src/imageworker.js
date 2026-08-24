@@ -5,7 +5,20 @@ const parseAPNG = typeof apngjs === 'function' ? apngjs : apngjs.default;
 import { parseGIF, decompressFrames } from 'gifuct-js';
 import pica from 'pica';
 
-function assembleAnimatedWebP(frames, width, height) {
+let globalCache = {
+  signature: "",
+  baseFrames: [], 
+  originalFramesPreviews: [],
+  originalDurations: [],
+  outputWidth: 0,
+  outputHeight: 0,
+  originalWidth: 0,
+  originalHeight: 0,
+  isAnimated: false,
+  formatStr: ""
+};
+
+function assembleAnimatedWebP(frames, width, height, loopCount = 0) {
   let totalPayloadSize = 0;
   
   const parsedFrames = frames.map(f => {
@@ -58,7 +71,7 @@ function assembleAnimatedWebP(frames, width, height) {
   u8.set([65, 78, 73, 77], offset);
   view.setUint32(offset + 4, 6, true);
   view.setUint32(offset + 8, 0, true);
-  view.setUint16(offset + 12, 0, true); 
+  view.setUint16(offset + 12, loopCount, true); 
   offset += 14;
 
   for (const f of parsedFrames) {
@@ -385,163 +398,211 @@ let currentJobPromise = Promise.resolve();
 let latestJobId = 0;
 
 self.addEventListener('message', (event) => {
-  const { jobId, file, settings, isFinal } = event.data;
+  const { jobId, file, settings, isFinal, isTimelineEdit } = event.data;
   latestJobId = jobId;
 
   currentJobPromise = currentJobPromise.then(async () => {
     if (latestJobId !== jobId) return;
-    await processImage(jobId, file, settings, isFinal);
+    await processImage(jobId, file, settings, isFinal, isTimelineEdit);
   }).catch(err => {
     console.error("Workerキューエラー:", err);
     self.postMessage({ jobId, status: 'error', message: err.message });
   });
 });
 
-async function processImage(jobId, file, settings, isFinal) {
+async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
   try {
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let { format, mimeType } = getFormatInfo(bytes);
-    
-    if (!mimeType) {
-      mimeType = file.type;
+    const sig = `${file.name}-${file.size}-${file.lastModified}-${settings.mode}-${settings.colors}-${settings.lossyQuality}-${settings.isResizeEnabled}-${settings.resizeHeight}-${isFinal}`;
+
+    if (sig !== globalCache.signature) {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let { format, mimeType } = getFormatInfo(bytes);
+      
       if (!mimeType) {
-        const ext = file.name.split('.').pop().toLowerCase();
-        if (ext === 'webp') mimeType = 'image/webp';
-        else if (ext === 'png') mimeType = 'image/png';
-        else if (ext === 'gif') mimeType = 'image/gif';
-        else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+        mimeType = file.type;
+        if (!mimeType) {
+          const ext = file.name.split('.').pop().toLowerCase();
+          if (ext === 'webp') mimeType = 'image/webp';
+          else if (ext === 'png') mimeType = 'image/png';
+          else if (ext === 'gif') mimeType = 'image/gif';
+          else if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+        }
       }
-    }
 
-    let decoder;
-    if (format === 'animated-webp') {
-      decoder = new WebpFallbackDecoder();
-      await decoder.init(buffer);
-    } else if (format === 'gif') {
-      decoder = new GifFallbackDecoder();
-      await decoder.init(buffer);
-    } else if (format === 'apng') {
-      decoder = new ApngFallbackDecoder();
-      await decoder.init(buffer);
-    } else {
-      decoder = new StaticFallbackDecoder();
-      await decoder.init(file);
-    }
+      let decoder;
+      if (format === 'animated-webp') {
+        decoder = new WebpFallbackDecoder();
+        await decoder.init(buffer);
+      } else if (format === 'gif') {
+        decoder = new GifFallbackDecoder();
+        await decoder.init(buffer);
+      } else if (format === 'apng') {
+        decoder = new ApngFallbackDecoder();
+        await decoder.init(buffer);
+      } else {
+        decoder = new StaticFallbackDecoder();
+        await decoder.init(file);
+      }
 
-    const { width, height, frameCount } = decoder;
-    const isAnimated = frameCount > 1;
+      const { width, height, frameCount } = decoder;
+      const isAnimated = frameCount > 1;
 
-    const MAX_TOTAL_PIXELS = 50_000_000;
-    if (width * height * frameCount > MAX_TOTAL_PIXELS) {
-      throw new Error(`総ピクセル数が上限(5000万px)を超えています。処理を中断しました。`);
-    }
-    if (frameCount > 150) {
-      throw new Error(`アニメーションのコマ数が多すぎます（上限: 150コマ / 現在: ${frameCount}コマ）`);
-    }
-    if (width > 2048 || height > 2048) {
-      throw new Error(`解像度が大きすぎます（上限: 2048x2048 px / 現在: ${width}x${height} px）`);
-    }
+      const MAX_TOTAL_PIXELS = 50_000_000;
+      if (width * height * frameCount > MAX_TOTAL_PIXELS) throw new Error(`総ピクセル数が上限(5000万px)を超えています。処理を中断しました。`);
+      if (frameCount > 150) throw new Error(`アニメーションのコマ数が多すぎます（上限: 150コマ / 現在: ${frameCount}コマ）`);
+      if (width > 2048 || height > 2048) throw new Error(`解像度が大きすぎます（上限: 2048x2048 px / 現在: ${width}x${height} px）`);
 
-    // ★ リサイズ後の寸法を計算（縦幅が指定サイズを超えている場合のみ縮小）
-    let outputWidth = width;
-    let outputHeight = height;
+      let outputWidth = width;
+      let outputHeight = height;
+      if (settings.isResizeEnabled && height > settings.resizeHeight) {
+        outputHeight = settings.resizeHeight;
+        outputWidth = Math.max(1, Math.round(width * (settings.resizeHeight / height)));
+      }
 
-    if (settings.isResizeEnabled && height > settings.resizeHeight) {
-      outputHeight = settings.resizeHeight;
-      outputWidth = Math.max(1, Math.round(width * (settings.resizeHeight / height)));
-    }
+      const picaRunner = pica();
+      const encodeMethod = isFinal ? 6 : 1; 
+      const iqInstance = settings.mode === 'lossless' && settings.colors < 256 ? new Imagequant() : null;
+      if (iqInstance) iqInstance.set_max_colors(settings.colors);
 
-    // picaのインスタンス作成
-    const picaRunner = pica();
+      globalCache.baseFrames = [];
+      globalCache.originalFramesPreviews = [];
+      globalCache.originalDurations = [];
 
-    const processedFrames = [];
-    const originalFramesPreviews = []; 
-    const encodeMethod = isFinal ? 6 : 1;
-    const iqInstance = settings.mode === 'lossless' && settings.colors < 256 ? new Imagequant() : null;
-    
-    if (iqInstance) iqInstance.set_max_colors(settings.colors);
+      for (let i = 0; i < frameCount; i++) {
+        let { imageData, durationMs } = await decoder.getFrame(i);
+        globalCache.originalDurations.push(durationMs); 
 
-    for (let i = 0; i < frameCount; i++) {
-      let { imageData, durationMs } = await decoder.getFrame(i);
-
-      // 元画像のプレビューは縮小「前」の元データから作る
-      const prevCanvas = new OffscreenCanvas(width, height);
-      const prevCtx = prevCanvas.getContext('2d', { willReadFrequently: true });
-      prevCtx.putImageData(imageData, 0, 0);
-      const prevBlob = await prevCanvas.convertToBlob({ type: 'image/webp', quality: 0.8 });
-      originalFramesPreviews.push(prevBlob);
-
-      // 高画質リサイズ処理の割り込み
-      if (outputWidth !== width || outputHeight !== height) {
+        // ★ 最適化1: タイムライン用の画像を長辺160px程度の極小サムネイルとして生成しメモリを劇的に節約
         const sourceCanvas = new OffscreenCanvas(width, height);
-        sourceCanvas.getContext('2d').putImageData(imageData, 0, 0);
+        sourceCanvas.getContext('2d', { willReadFrequently: true }).putImageData(imageData, 0, 0);
+
+        const maxThumbEdge = 160;
+        const scale = Math.min(1, maxThumbEdge / Math.max(width, height));
+        const thumbWidth = Math.max(1, Math.round(width * scale));
+        const thumbHeight = Math.max(1, Math.round(height * scale));
         
-        const resizedCanvas = new OffscreenCanvas(outputWidth, outputHeight);
+        const thumbCanvas = new OffscreenCanvas(thumbWidth, thumbHeight);
+        thumbCanvas.getContext('2d').drawImage(sourceCanvas, 0, 0, thumbWidth, thumbHeight);
         
-        // picaによるランチョス法リサイズ ＋ 軽くアンシャープマスクでぼやけを防ぐ
-        await picaRunner.resize(sourceCanvas, resizedCanvas, {
-          unsharpAmount: 60,
-          unsharpRadius: 0.6,
-          unsharpThreshold: 2
+        const prevBlob = await thumbCanvas.convertToBlob({ type: 'image/webp', quality: 0.7 });
+        globalCache.originalFramesPreviews.push(prevBlob);
+
+        if (outputWidth !== width || outputHeight !== height) {
+          const resizedCanvas = new OffscreenCanvas(outputWidth, outputHeight);
+          await picaRunner.resize(sourceCanvas, resizedCanvas, { unsharpAmount: 60, unsharpRadius: 0.6, unsharpThreshold: 2 });
+          imageData = resizedCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, outputWidth, outputHeight);
+        }
+
+        if (iqInstance) {
+          const uint8Array = new Uint8Array(imageData.data.buffer);
+          const iqImage = new ImagequantImage(uint8Array, outputWidth, outputHeight, 0);
+          const output = iqInstance.process(iqImage);
+          const pngBlob = new Blob([output.buffer], { type: "image/png" });
+          const bmp = await createImageBitmap(pngBlob);
+          const qCanvas = new OffscreenCanvas(outputWidth, outputHeight);
+          const qCtx = qCanvas.getContext('2d', { willReadFrequently: true });
+          qCtx.clearRect(0, 0, outputWidth, outputHeight);
+          qCtx.drawImage(bmp, 0, 0);
+          imageData = qCtx.getImageData(0, 0, outputWidth, outputHeight);
+          bmp.close();
+        }
+
+        const webpBuffer = await encode(imageData, {
+          lossless: settings.mode === 'lossless' ? 1 : 0,
+          quality: settings.mode === 'lossy' ? settings.lossyQuality : 100,
+          method: encodeMethod,
+          exact: 1
         });
-        
-        imageData = resizedCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, outputWidth, outputHeight);
+
+        globalCache.baseFrames.push({ webpBuffer, originalDurationMs: durationMs });
       }
 
-      if (iqInstance) {
-        const uint8Array = new Uint8Array(imageData.data.buffer);
-        const iqImage = new ImagequantImage(uint8Array, outputWidth, outputHeight, 0);
-        const output = iqInstance.process(iqImage);
-        
-        const pngBlob = new Blob([output.buffer], { type: "image/png" });
-        const bmp = await createImageBitmap(pngBlob);
-        
-        const qCanvas = new OffscreenCanvas(outputWidth, outputHeight);
-        const qCtx = qCanvas.getContext('2d', { willReadFrequently: true });
-        qCtx.clearRect(0, 0, outputWidth, outputHeight);
-        qCtx.drawImage(bmp, 0, 0);
-        imageData = qCtx.getImageData(0, 0, outputWidth, outputHeight);
-        bmp.close();
-      }
+      globalCache.outputWidth = outputWidth;
+      globalCache.outputHeight = outputHeight;
+      globalCache.originalWidth = width;
+      globalCache.originalHeight = height;
+      globalCache.isAnimated = isAnimated;
+      globalCache.formatStr = format;
+      globalCache.signature = sig; 
+    }
 
-      const webpBuffer = await encode(imageData, {
-        lossless: settings.mode === 'lossless' ? 1 : 0,
-        quality: settings.mode === 'lossy' ? settings.lossyQuality : 100,
-        method: encodeMethod,
-        exact: 1
+    let forwardAccumulator = 0; 
+    const processedFrames = [];
+
+    for (let i = 0; i < globalCache.baseFrames.length; i++) {
+      const baseFrame = globalCache.baseFrames[i];
+      let control = settings.frameControls && settings.frameControls[i] 
+        ? settings.frameControls[i] : { state: 'keep', customDuration: null };
+
+      let currentDuration = control.customDuration !== null ? control.customDuration : baseFrame.originalDurationMs;
+
+      if (control.state === 'discard') continue;
+      if (control.state === 'absorb') {
+        if (processedFrames.length > 0) {
+          processedFrames[processedFrames.length - 1].durationMs += currentDuration;
+        } else {
+          forwardAccumulator += currentDuration;
+        }
+        continue;
+      }
+      
+      processedFrames.push({
+        webpBuffer: baseFrame.webpBuffer, 
+        durationMs: currentDuration + forwardAccumulator
       });
+      forwardAccumulator = 0; 
+    }
 
-      processedFrames.push({ durationMs, webpBuffer });
+    if (forwardAccumulator > 0 && processedFrames.length > 0) {
+      processedFrames[processedFrames.length - 1].durationMs += forwardAccumulator;
+    }
+
+    if (processedFrames.length === 0 && globalCache.baseFrames.length > 0) {
+      processedFrames.push({
+        webpBuffer: globalCache.baseFrames[0].webpBuffer,
+        durationMs: globalCache.baseFrames[0].originalDurationMs
+      });
     }
 
     let outputBlob;
+    let previewBlob;
     let frameBlobs = [];
-    if (isAnimated) {
-      // 結合処理にも新しいサイズを渡す
-      const animatedWebPBuffer = assembleAnimatedWebP(processedFrames, outputWidth, outputHeight);
+
+    if (globalCache.isAnimated) {
+      const animatedWebPBuffer = assembleAnimatedWebP(processedFrames, globalCache.outputWidth, globalCache.outputHeight, 0);
       outputBlob = new Blob([animatedWebPBuffer], { type: 'image/webp' });
-      frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
+
+      const previewLoopCount = settings.syncPreviewLoop ? 1 : 0;
+      const previewBuffer = assembleAnimatedWebP(processedFrames, globalCache.outputWidth, globalCache.outputHeight, previewLoopCount);
+      previewBlob = new Blob([previewBuffer], { type: 'image/webp' });
+
+      if (!isTimelineEdit) {
+        frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
+      }
     } else {
       outputBlob = new Blob([processedFrames[0].webpBuffer], { type: 'image/webp' });
-      frameBlobs = [outputBlob];
+      previewBlob = outputBlob;
+      if (!isTimelineEdit) frameBlobs = [outputBlob];
     }
 
     self.postMessage({
       jobId: jobId,
       status: 'success',
-      blob: outputBlob,
-      originalFrames: originalFramesPreviews, 
-      processedFrames: frameBlobs, 
+      blob: isFinal ? outputBlob : previewBlob,
+      originalFrames: isTimelineEdit ? null : globalCache.originalFramesPreviews, 
+      processedFrames: isTimelineEdit ? null : frameBlobs, 
+      originalDurations: globalCache.originalDurations,
       originalSize: file.size,
-      processedSize: outputBlob.size,
-      originalWidth: width,           
-      originalHeight: height,         
-      processedWidth: outputWidth,    
-      processedHeight: outputHeight,  
-      isAnimated: isAnimated,
+      processedSize: outputBlob.size, 
+      originalWidth: globalCache.originalWidth,           
+      originalHeight: globalCache.originalHeight,         
+      processedWidth: globalCache.outputWidth,    
+      processedHeight: globalCache.outputHeight,  
+      isAnimated: globalCache.isAnimated,
       isFinal: isFinal,
-      detectedFormat: format 
+      isTimelineEdit: isTimelineEdit,
+      detectedFormat: globalCache.formatStr 
     });
   } catch (error) {
     console.error("Worker内エラー:", error);
