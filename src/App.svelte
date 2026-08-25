@@ -6,6 +6,9 @@
   let originalUrl = null;
   let processedUrl = null;
   
+  let originalBlob = null;
+  let processedBlob = null;
+  
   let originalFramesUrls = [];
   let processedFramesUrls = [];
   let currentFrame = -1; 
@@ -49,10 +52,7 @@
   
   let fileInput;
 
-  // ★ 追加: デバイス判定用フラグ
-  let isMobile = false;
-
-  // --- タイムラインシーク（時間ベース）用の状態管理 ---
+  let sliderMode = 'frame'; 
   let currentTimeMs = 0;
 
   $: accumulatedTimes = originalDurations.reduce((acc, dur, i) => {
@@ -63,7 +63,6 @@
 
   $: totalDuration = originalDurations.reduce((a, b) => a + b, 0);
 
-  // 時間(ms)スライダーを動かした時に、現在のオリジナルコマ番号を逆算して同期させる
   function syncFrameFromTime() {
     if (accumulatedTimes.length === 0) return;
     let idx = accumulatedTimes.findIndex((startTime, i) => {
@@ -74,14 +73,12 @@
     currentFrame = idx;
   }
 
-  // アニメーション再生ループ等でコマが進んだ時に、時間を同期させる
   function syncTimeFromFrame() {
     if (currentFrame >= 0 && currentFrame < accumulatedTimes.length) {
       currentTimeMs = accumulatedTimes[currentFrame];
     }
   }
 
-  // 現在の「圧縮後のコマ位置」を計算する処理
   $: currentProcessedFrameIndex = (() => {
     if (currentFrame === -1 || !frameControls || frameControls.length === 0) return currentFrame + 1;
     let count = 0;
@@ -159,6 +156,9 @@
 
   function resetState() {
     currentFile = null;
+    originalBlob = null;
+    processedBlob = null;
+
     if (originalUrl) URL.revokeObjectURL(originalUrl);
     originalUrl = null;
     if (processedUrl) URL.revokeObjectURL(processedUrl);
@@ -189,9 +189,6 @@
   }
 
   onMount(() => {
-    // ★ PCかスマホかを画面幅で判定
-    isMobile = window.matchMedia('(max-width: 768px)').matches;
-
     worker = new Worker(new URL('./imageworker.js', import.meta.url), { type: 'module' });
     
     worker.onmessage = (e) => {
@@ -216,10 +213,13 @@
             return;
           }
 
+          originalBlob = currentFile;
+          processedBlob = data.blob;
+
           if (originalUrl) URL.revokeObjectURL(originalUrl);
           if (processedUrl) URL.revokeObjectURL(processedUrl);
-          originalUrl = URL.createObjectURL(currentFile);
-          processedUrl = URL.createObjectURL(data.blob);
+          originalUrl = URL.createObjectURL(originalBlob);
+          processedUrl = URL.createObjectURL(processedBlob);
           
           if (!data.isTimelineEdit) {
             revokeAll(originalFramesUrls);
@@ -286,7 +286,6 @@
     }
     resetState();
     currentFile = file;
-    originalUrl = URL.createObjectURL(file);
     runWorker(false);
   }
 
@@ -366,15 +365,19 @@
   
   $: processedPreviewSrc = currentFrame === -1 ? (processedUrl || originalUrl) : getPreviewFrameUrl(currentFrame);
 
-  let origImg1, procImg1, origImg2, procImg2;
-  $: if (settings.syncPreviewLoop && syncTrigger > 0) {
-    [origImg1, procImg1, origImg2, procImg2].forEach(img => {
-      if (img && img.src) {
-        const s = img.src;
-        img.src = '';
-        setTimeout(() => { if (img) img.src = s; }, 10);
-      }
-    });
+  $: if (settings.syncPreviewLoop && syncTrigger > 0 && currentFrame === -1) {
+    if (originalBlob && processedBlob) {
+      const oldOrigUrl = originalUrl;
+      const oldProcUrl = processedUrl;
+      
+      originalUrl = URL.createObjectURL(originalBlob);
+      processedUrl = URL.createObjectURL(processedBlob);
+      
+      setTimeout(() => {
+        if (oldOrigUrl) URL.revokeObjectURL(oldOrigUrl);
+        if (oldProcUrl) URL.revokeObjectURL(oldProcUrl);
+      }, 500);
+    }
   }
 
   function toggleFrameState(index, event) {
@@ -576,25 +579,27 @@
     <div class="preview-area" transition:fade={{duration: 150}}>
       <h3>プレビュー</h3>
       
+      <!-- ★ メイン画面の比較コンテナもレスポンシブ化 -->
       <div class="comparison-container">
         <div class="image-box">
-          <div class="size-label-container">
+          <div class="size-label-container responsive-meta">
             <span class="label-title">オリジナル</span>
-            <span class="label-value">{formatSize(currentFile.size)}</span>
-            <span class="meta-info">
-              {getFileFormat(currentFile, resultStats?.isAnimated)}
-              {#if resultStats?.originalHeight}
-                | {resultStats.originalHeight} × {resultStats.originalWidth} px
-              {/if}
+            <div class="meta-values">
+              <span class="label-value">{formatSize(currentFile.size)}</span>
+              <span class="meta-info desktop-only">
+                {getFileFormat(currentFile, resultStats?.isAnimated)}
+                {#if resultStats?.originalHeight} | {resultStats.originalHeight} × {resultStats.originalWidth} px {/if}
+                {#if resultStats?.isAnimated && resultStats?.originalFrameCount} | {resultStats.originalFrameCount} コマ {/if}
+              </span>
               {#if resultStats?.isAnimated && resultStats?.originalFrameCount}
-                | {resultStats.originalFrameCount} コマ
+                <span class="meta-info-compact mobile-only">{resultStats.originalFrameCount} コマ</span>
               {/if}
-            </span>
+            </div>
           </div>
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
-            <img bind:this={origImg1}
+            <img
               src={originalPreviewSrc} 
               alt="元画像" class="zoomable" draggable="false" 
               on:contextmenu|preventDefault
@@ -604,32 +609,29 @@
         </div>
 
         <div class="image-box">
-          <div class="size-label-container">
-            <span class="label-title">圧縮後 (プレビュー画質)</span>
-            {#if resultStats}
+          <div class="size-label-container responsive-meta">
+            <span class="label-title">圧縮後</span>
+            <div class="meta-values">
               <span class="label-value highlight" class:text-danger={isOverLimit || isSizeIncreased}>
                 {formatSize(resultStats.processed)}
               </span>
-              <span class="label-sub" class:text-danger={isSizeIncreased}>
+              <span class="label-sub desktop-only" class:text-danger={isSizeIncreased}>
                 ({isSizeIncreased ? `+${sizeDiffPercent}% 増加` : `${sizeDiffPercent}% 削減`})
               </span>
-              <span class="meta-info">
+              <span class="meta-info desktop-only">
                 WebP
-                {#if resultStats.processedHeight}
-                  | {resultStats.processedHeight} × {resultStats.processedWidth} px
-                {/if}
-                {#if resultStats?.isAnimated && resultStats?.processedFrameCount}
-                  | {resultStats.processedFrameCount} コマ
-                {/if}
+                {#if resultStats.processedHeight} | {resultStats.processedHeight} × {resultStats.processedWidth} px {/if}
+                {#if resultStats?.isAnimated && resultStats?.processedFrameCount} | {resultStats.processedFrameCount} コマ {/if}
               </span>
-            {:else}
-              <span class="label-value">計算中...</span>
-            {/if}
+              {#if resultStats?.isAnimated && resultStats?.processedFrameCount}
+                <span class="meta-info-compact mobile-only">{resultStats.processedFrameCount} コマ</span>
+              {/if}
+            </div>
           </div>
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
-            <img bind:this={procImg1}
+            <img 
               src={processedPreviewSrc} 
               alt="プレビュー" class="zoomable" class:processing={isProcessing} draggable="false" 
               on:contextmenu|preventDefault
@@ -643,34 +645,56 @@
       </div>
       
       {#if resultStats?.isAnimated && processedFramesUrls.length > 0}
-        <div class="frame-controls">
-          <div class="frame-buttons">
-            <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
+        <div class="frame-controls responsive-controls">
+          <!-- PC用ボタン -->
+          <div class="desktop-only-flex">
+            <div class="frame-buttons">
+              <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
+              <button class:active={currentFrame !== -1} on:click={() => { 
+                if (currentFrame === -1) {
+                  currentFrame = 0;
+                  if (accumulatedTimes.length > 0) currentTimeMs = accumulatedTimes[0];
+                }
+                clearInterval(syncInterval); 
+              }}>⏸ コマ送りで比較</button>
+            </div>
+            <div class="sync-option-row">
+              <label class="sync-checkbox-wrapper">
+                <input type="checkbox" bind:checked={settings.syncPreviewLoop} />
+                <span>ループを同期</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- スマホ用ボタン (1行) -->
+          <div class="control-row-single mobile-only-flex">
+            <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメ</button>
             <button class:active={currentFrame !== -1} on:click={() => { 
               if (currentFrame === -1) {
                 currentFrame = 0;
                 if (accumulatedTimes.length > 0) currentTimeMs = accumulatedTimes[0];
               }
               clearInterval(syncInterval); 
-            }}>⏸ コマ送りで比較</button>
-          </div>
-          
-          <div class="sync-option-row">
-            <label class="sync-checkbox-wrapper">
+            }}>⏸ コマ送り比較</button>
+            <label class="compact-sync">
               <input type="checkbox" bind:checked={settings.syncPreviewLoop} />
-              <span>ループを同期</span>
+              <span>ループ同期</span>
             </label>
           </div>
 
           {#if currentFrame !== -1}
             <div class="frame-slider">
               <input type="range" min="0" max={totalDuration > 0 ? totalDuration - 1 : 0} bind:value={currentTimeMs} on:input={syncFrameFromTime} />
-              <span class="frame-counter">
+              <span class="frame-counter desktop-only">
                 {currentTimeMs} / {totalDuration} ms
                 <span class="separator">|</span>
                 オリジナル: {currentFrame + 1} / {originalFramesUrls.length} コマ
                 <span class="separator">|</span>
                 圧縮後: {currentProcessedFrameIndex} / {Math.max(1, processedFramesUrls.length)} コマ
+              </span>
+              <!-- スマホ用スライダーテキスト -->
+              <span class="frame-counter mobile-only">
+                {currentTimeMs}ms <span class="separator">|</span> 元:{currentFrame + 1}コマ <span class="separator">|</span> 縮:{currentProcessedFrameIndex}コマ
               </span>
             </div>
           {/if}
@@ -705,7 +729,7 @@
 
   {#if zoomedSrc}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div class="zoom-modal" on:click={() => zoomedSrc = null} transition:fade={{ duration: 150 }}>
       <img src={zoomedSrc} alt="拡大プレビュー" draggable="false" on:contextmenu|preventDefault />
     </div>
@@ -718,6 +742,7 @@
   <div class="editor-modal-backdrop" transition:fade={{ duration: 150 }}>
     <div class="editor-modal-content">
       
+      <!-- ★ トップセクション (UI分離・レスポンシブ化) -->
       <div class="modal-top-section">
         <div class="editor-modal-header">
           <h2>タイムライン編集</h2>
@@ -726,23 +751,24 @@
         
         <div class="comparison-container">
           <div class="image-box">
-            <div class="size-label-container">
+            <div class="size-label-container responsive-meta">
               <span class="label-title">オリジナル</span>
-              <span class="label-value">{formatSize(currentFile.size)}</span>
-              <span class="meta-info">
-                {getFileFormat(currentFile, resultStats?.isAnimated)}
-                {#if resultStats?.originalHeight}
-                  | {resultStats.originalHeight} × {resultStats.originalWidth} px
-                {/if}
+              <div class="meta-values">
+                <span class="label-value">{formatSize(currentFile.size)}</span>
+                <span class="meta-info desktop-only">
+                  {getFileFormat(currentFile, resultStats?.isAnimated)}
+                  {#if resultStats?.originalHeight} | {resultStats.originalHeight} × {resultStats.originalWidth} px {/if}
+                  {#if resultStats?.isAnimated && resultStats?.originalFrameCount} | {resultStats.originalFrameCount} コマ {/if}
+                </span>
                 {#if resultStats?.isAnimated && resultStats?.originalFrameCount}
-                  | {resultStats.originalFrameCount} コマ
+                  <span class="meta-info-compact mobile-only">{resultStats.originalFrameCount} コマ</span>
                 {/if}
-              </span>
+              </div>
             </div>
             <!-- svelte-ignore a11y-click-events-have-key-events -->
             <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
             <div class="image-container">
-              <img bind:this={origImg2}
+              <img 
                 src={originalPreviewSrc} 
                 alt="元画像" class="zoomable" draggable="false" 
                 on:contextmenu|preventDefault
@@ -752,32 +778,29 @@
           </div>
 
           <div class="image-box">
-            <div class="size-label-container">
-              <span class="label-title">圧縮後 (プレビュー画質)</span>
-              {#if resultStats}
+            <div class="size-label-container responsive-meta">
+              <span class="label-title">圧縮後</span>
+              <div class="meta-values">
                 <span class="label-value highlight" class:text-danger={isOverLimit || isSizeIncreased}>
                   {formatSize(resultStats.processed)}
                 </span>
-                <span class="label-sub" class:text-danger={isSizeIncreased}>
+                <span class="label-sub desktop-only" class:text-danger={isSizeIncreased}>
                   ({isSizeIncreased ? `+${sizeDiffPercent}% 増加` : `${sizeDiffPercent}% 削減`})
                 </span>
-                <span class="meta-info">
+                <span class="meta-info desktop-only">
                   WebP
-                  {#if resultStats.processedHeight}
-                    | {resultStats.processedHeight} × {resultStats.processedWidth} px
-                  {/if}
-                  {#if resultStats?.isAnimated && resultStats?.processedFrameCount}
-                    | {resultStats.processedFrameCount} コマ
-                  {/if}
+                  {#if resultStats.processedHeight} | {resultStats.processedHeight} × {resultStats.processedWidth} px {/if}
+                  {#if resultStats?.isAnimated && resultStats?.processedFrameCount} | {resultStats.processedFrameCount} コマ {/if}
                 </span>
-              {:else}
-                <span class="label-value">計算中...</span>
-              {/if}
+                {#if resultStats?.isAnimated && resultStats?.processedFrameCount}
+                  <span class="meta-info-compact mobile-only">{resultStats.processedFrameCount} コマ</span>
+                {/if}
+              </div>
             </div>
             <!-- svelte-ignore a11y-click-events-have-key-events -->
             <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
             <div class="image-container">
-              <img bind:this={procImg2}
+              <img 
                 src={processedPreviewSrc} 
                 alt="プレビュー" class="zoomable" class:processing={isProcessing} draggable="false" 
                 on:contextmenu|preventDefault
@@ -791,33 +814,56 @@
         </div>
         
         {#if resultStats?.isAnimated && processedFramesUrls.length > 0}
-          <div class="frame-controls">
-            <div class="frame-buttons">
-              <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
+          <div class="frame-controls responsive-controls">
+            <!-- PC用ボタン -->
+            <div class="desktop-only-flex">
+              <div class="frame-buttons">
+                <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
+                <button class:active={currentFrame !== -1} on:click={() => { 
+                  if (currentFrame === -1) {
+                    currentFrame = 0;
+                    if (accumulatedTimes.length > 0) currentTimeMs = accumulatedTimes[0];
+                  }
+                  clearInterval(syncInterval); 
+                }}>⏸ コマ送りで比較</button>
+              </div>
+              <div class="sync-option-row">
+                <label class="sync-checkbox-wrapper">
+                  <input type="checkbox" bind:checked={settings.syncPreviewLoop} />
+                  <span>ループを同期</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- スマホ用ボタン (1行) -->
+            <div class="control-row-single mobile-only-flex">
+              <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメ</button>
               <button class:active={currentFrame !== -1} on:click={() => { 
                 if (currentFrame === -1) {
                   currentFrame = 0;
                   if (accumulatedTimes.length > 0) currentTimeMs = accumulatedTimes[0];
                 }
                 clearInterval(syncInterval); 
-              }}>⏸ コマ送りで比較</button>
-            </div>
-            <div class="sync-option-row">
-              <label class="sync-checkbox-wrapper">
+              }}>⏸ コマ送り比較</button>
+              <label class="compact-sync">
                 <input type="checkbox" bind:checked={settings.syncPreviewLoop} />
-                <span>ループを同期</span>
+                <span>ループ同期</span>
               </label>
             </div>
 
             {#if currentFrame !== -1}
               <div class="frame-slider">
                 <input type="range" min="0" max={totalDuration > 0 ? totalDuration - 1 : 0} bind:value={currentTimeMs} on:input={syncFrameFromTime} />
-                <span class="frame-counter">
+                <span class="frame-counter desktop-only">
                   {currentTimeMs} / {totalDuration} ms
                   <span class="separator">|</span>
                   オリジナル: {currentFrame + 1} / {originalFramesUrls.length} コマ
                   <span class="separator">|</span>
                   圧縮後: {currentProcessedFrameIndex} / {Math.max(1, processedFramesUrls.length)} コマ
+                </span>
+                <!-- スマホ用スライダーテキスト -->
+                <span class="frame-counter mobile-only">
+                  {currentTimeMs}ms <span class="separator">|</span> 元:{currentFrame + 1}コマ <span class="separator">|</span> 縮:{currentProcessedFrameIndex}コマ
                 </span>
               </div>
             {/if}
@@ -850,8 +896,8 @@
               <!-- svelte-ignore a11y-click-events-have-key-events -->
               <!-- svelte-ignore a11y-no-static-element-interactions -->
               <div class="frame-image-wrapper" on:click={(e) => toggleFrameState(i, e)} title="クリックで切替 / Shift+クリックで範囲選択">
-                <!-- ★ デバイス幅に応じて loading 属性を動的に変更 -->
-                <img src={url} alt="コマ {i+1}" draggable="false" loading={isMobile ? 'lazy' : 'eager'} decoding="async" />
+                <!-- チラつき防止のため遅延読み込みなし -->
+                <img src={url} alt="コマ {i+1}" draggable="false" />
                 
                 {#if frameControls[i].state === 'absorb'}
                   <div class="state-overlay absorb">
@@ -968,6 +1014,8 @@
   .preview-area { text-align: center; margin-top: 1rem; }
   .comparison-container { display: flex; gap: 1rem; justify-content: center; align-items: flex-start; margin-top: 1rem; }
   .image-box { flex: 1; width: 48%; display: flex; flex-direction: column; }
+  
+  /* デスクトップベースのメタコンテナスタイル */
   .size-label-container { height: 5.5rem; display: flex; flex-direction: column; justify-content: flex-end; margin-bottom: 0.5rem; }
   .label-title { font-size: 0.9em; color: #555; }
   .label-value { font-size: 1.1em; }
@@ -975,7 +1023,8 @@
   .label-value.text-danger { color: #dc3545; }
   .label-sub { font-size: 0.8em; color: #666; }
   .label-sub.text-danger { color: #dc3545; font-weight: bold; }
-  .meta-info { font-size: 0.75rem; color: #888; margin-top: 2px; line-height: 1.4; }
+  .meta-info { font-size: 0.75rem; color: #888; margin-top: 2px; line-height: 1.4; display: block; }
+  .meta-info-compact { font-size: 0.8rem; color: #666; white-space: nowrap; margin-left: 6px; }
   
   .image-container { 
     height: 280px;
@@ -1009,6 +1058,7 @@
   .editor-toggle-btn:hover { background: #e0e0e0; }
   .editor-toggle-btn.active { background: #007bff; color: white; border-color: #007bff; }
 
+  /* --- モーダル全体 --- */
   .editor-modal-backdrop {
     position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
     background: rgba(0, 0, 0, 0.85); 
@@ -1036,11 +1086,9 @@
     background: #6c757d; color: white; border: none; padding: 0.5rem 1.5rem; border-radius: 6px; font-weight: bold; cursor: pointer; transition: background 0.2s; font-size: 1rem;
   }
   .modal-close-x:hover { background: #5a6268; }
+  .modal-top-section .image-container { height: 192px; min-height: 192px; }
 
-  .modal-top-section .image-container {
-    height: 192px; min-height: 192px;
-  }
-
+  /* --- 下部セクション --- */
   .editor-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;}
   .editor-header h3 { margin: 0; font-size: 1.1rem; }
   .editor-hint { font-size: 0.8rem; color: #666; }
@@ -1054,6 +1102,65 @@
   .frame-container { transition: opacity 0.2s; }
   .frame-container.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
   .frame-container.strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 10px; }
+  .frame-item { 
+    background: white; border: 1px solid #ddd; border-radius: 6px; padding: 6px; display: flex; flex-direction: column; gap: 6px; 
+  }
+
+  /* ★ CSSクラスによる レスポンシブ (PC/スマホ) 完全分離定義 ★ */
+  .mobile-only { display: none !important; }
+  .mobile-only-flex { display: none !important; }
+
+  @media (max-width: 768px) {
+    /* PC表示を隠す */
+    .desktop-only { display: none !important; }
+    .desktop-only-flex { display: none !important; }
+
+    /* スマホ表示を有効化 */
+    .mobile-only { display: inline-block !important; }
+    span.mobile-only { display: inline !important; }
+    .mobile-only-flex { display: flex !important; }
+
+    /* モーダル上部の余白を削る */
+    .modal-top-section { padding: 0.5rem 1rem; }
+    .editor-modal-header { margin-bottom: 0.5rem; }
+    .editor-modal-header h2 { font-size: 1.2rem; }
+    .modal-close-x { padding: 0.4rem 1rem; font-size: 0.85rem; }
+
+    /* 画像プレビュー領域の極限圧縮 */
+    .modal-top-section .image-container {
+      padding: 10px; 
+      height: auto;
+      min-height: unset;
+      max-height: 140px; 
+      aspect-ratio: 1;
+    }
+    .modal-top-section .comparison-container { gap: 0.5rem; }
+
+    /* メタ情報の改行廃止＆コンパクト化 */
+    .responsive-meta { height: auto; margin-bottom: 0.25rem; display: flex; flex-direction: column; justify-content: flex-end; }
+    .responsive-meta .label-title { font-size: 0.8rem; margin-bottom: 2px; line-height: 1.2; }
+    .meta-values { display: flex; align-items: baseline; gap: 6px; }
+
+    /* ボタン群を1行に収める */
+    .control-row-single { gap: 0.3rem; flex-wrap: nowrap; margin-bottom: 0.2rem; align-items: center; justify-content: center;}
+    .control-row-single button { padding: 0.4rem 0.5rem; font-size: 0.75rem; flex: 1; border-radius: 4px; border: 1px solid #ccc; background: white; font-weight: bold; cursor: pointer; white-space: nowrap; }
+    .control-row-single button.active { background: #6c757d; color: white; border-color: #6c757d; }
+    
+    .compact-sync { font-size: 0.75rem; margin: 0; white-space: nowrap; cursor: pointer; }
+    .compact-sync input { margin-right: 2px; }
+
+    .responsive-controls { padding: 0.5rem; margin-top: 0.5rem; }
+    .frame-slider { margin-bottom: 0; }
+    .frame-counter { font-size: 0.7rem; }
+
+    /* 下部エディタ領域の余白調整 */
+    .modal-bottom-section { padding: 0.5rem 1rem; }
+    .editor-header { margin-bottom: 0.5rem; }
+    .editor-header h3 { font-size: 1rem; }
+    .editor-toolbar { gap: 0.5rem; margin-bottom: 0.5rem; }
+    .batch-actions button { padding: 0.3rem 0.5rem; font-size: 0.75rem; }
+  }
+
   @media (max-width: 600px) {
     .frame-container.strip { flex-direction: column; overflow-x: hidden; overflow-y: auto; max-height: 450px; }
     .frame-container.strip .frame-item { flex-direction: row; align-items: center; width: 100%; box-sizing: border-box; }
@@ -1061,17 +1168,7 @@
     .frame-container.strip .frame-controls-box { margin-left: 15px; flex: 1; display: flex; flex-direction: column; justify-content: center;}
   }
 
-  /* ★ CSS修正: content-visibility をPCとスマホで動的に切り分け */
-  .frame-item { 
-    background: white; border: 1px solid #ddd; border-radius: 6px; padding: 6px; display: flex; flex-direction: column; gap: 6px; 
-  }
-  @media (max-width: 768px) {
-    .frame-item {
-      content-visibility: auto; 
-      contain-intrinsic-size: 110px 180px;
-    }
-  }
-
+  /* --- 共通の部品スタイル --- */
   .frame-image-wrapper { position: relative; cursor: pointer; background: #e5e5e5; border-radius: 4px; overflow: hidden; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; user-select: none; }
   .frame-image-wrapper img { max-width: 100%; max-height: 100%; object-fit: contain; }
   
