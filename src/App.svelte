@@ -964,7 +964,7 @@
       <h2>クレジット / ライセンス</h2>
       <p class="license-intro">当ツールは、以下の素晴らしいツールやオープンソースライブラリを利用して構築されています。</p>
       <div class="license-list">
-        <div class="license-item"><strong>アイコン作成: EmoteLab</strong><p>感謝の意を表します。</p></div>
+        <div class="license-item"><strong>アイコン作成: EmoteLab</strong></div>
         <div class="license-item"><strong>Svelte / Vite</strong><p>MIT License</p></div>
         <div class="license-item"><strong>@jsquash/webp</strong><p>ISC / MIT License</p></div>
         <div class="license-item"><strong>apng-js</strong><p>MIT License</p></div>
