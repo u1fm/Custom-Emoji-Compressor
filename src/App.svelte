@@ -12,7 +12,9 @@
   let originalFramesUrls = [];
   let processedFramesUrls = [];
   let currentFrame = -1; 
-  let zoomedSrc = null;
+  
+  // ★ 修正: URL文字列ではなく、「どちらの画像を開いているか」の状態を保持する
+  let zoomedMode = null; // 'original' | 'processed' | null
   
   let showLicenseModal = false;
   let showBatchDurationModal = false;
@@ -42,7 +44,6 @@
   let frameControls = []; 
   let frameViewMode = 'grid'; 
   
-  // ★ サムネイルサイズの選択状態（デフォルト：中）
   let thumbnailSize = 'medium'; 
   
   let lastClickedFrame = -1;
@@ -185,7 +186,7 @@
     
     currentTimeMs = 0;
     currentFrame = -1;
-    zoomedSrc = null;
+    zoomedMode = null; // ★ 修正
     resultStats = null;
     isProcessing = false;
     isSaving = false;
@@ -600,11 +601,12 @@
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
+            <!-- ★ 修正: クリックした状態（モード）を渡すように変更 -->
             <img
               src={originalPreviewSrc} 
               alt="元画像" class="zoomable" draggable="false" 
               on:contextmenu|preventDefault
-              on:click={() => zoomedSrc = originalPreviewSrc} 
+              on:click={() => zoomedMode = 'original'} 
             />
           </div>
         </div>
@@ -629,11 +631,12 @@
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
+            <!-- ★ 修正: クリックした状態（モード）を渡すように変更 -->
             <img 
               src={processedPreviewSrc} 
               alt="プレビュー" class="zoomable" class:processing={isProcessing} draggable="false" 
               on:contextmenu|preventDefault
-              on:click={() => zoomedSrc = processedPreviewSrc}
+              on:click={() => zoomedMode = 'processed'}
             />
             {#if isProcessing}
               <div class="loading-overlay">処理中...</div>
@@ -644,7 +647,6 @@
       
       {#if resultStats?.isAnimated && processedFramesUrls.length > 0}
         <div class="frame-controls responsive-controls">
-          <!-- PC用ボタン (通常画面もチェックボックスを含めて1行に統合) -->
           <div class="desktop-only">
             <div class="frame-buttons" style="margin-bottom: 0;">
               <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
@@ -662,7 +664,6 @@
             </div>
           </div>
 
-          <!-- スマホ用ボタン (1行) -->
           <div class="control-row-single mobile-only-flex">
             <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメ</button>
             <button class:active={currentFrame !== -1} on:click={() => { 
@@ -688,7 +689,6 @@
                 <span class="separator">|</span>
                 圧縮後: {currentProcessedFrameIndex} / {Math.max(1, processedFramesUrls.length)} コマ
               </span>
-              <!-- スマホ用スライダーテキスト -->
               <span class="frame-counter mobile-only">
                 {currentTimeMs}ms <span class="separator">|</span> 元:{currentFrame + 1}コマ <span class="separator">|</span> 縮:{currentProcessedFrameIndex}コマ
               </span>
@@ -723,11 +723,12 @@
     </div>
   {/if}
 
-  {#if zoomedSrc}
+  <!-- ★ 修正: モーダル画像は zoomedMode に応じて常に最新の src を参照する -->
+  {#if zoomedMode}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
-    <div class="zoom-modal" on:click={() => zoomedSrc = null} transition:fade={{ duration: 150 }}>
-      <img src={zoomedSrc} alt="拡大プレビュー" draggable="false" on:contextmenu|preventDefault />
+    <div class="zoom-modal" on:click={() => zoomedMode = null} transition:fade={{ duration: 150 }}>
+      <img src={zoomedMode === 'original' ? originalPreviewSrc : processedPreviewSrc} alt="拡大プレビュー" draggable="false" on:contextmenu|preventDefault />
     </div>
   {/if}
 </main>
@@ -760,14 +761,11 @@
                 {/if}
               </div>
             </div>
-            <!-- svelte-ignore a11y-click-events-have-key-events -->
-            <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
             <div class="image-container">
               <img 
                 src={originalPreviewSrc} 
-                alt="元画像" class="zoomable" draggable="false" 
+                alt="元画像" draggable="false" 
                 on:contextmenu|preventDefault
-                on:click={() => zoomedSrc = originalPreviewSrc} 
               />
             </div>
           </div>
@@ -792,14 +790,11 @@
                 {/if}
               </div>
             </div>
-            <!-- svelte-ignore a11y-click-events-have-key-events -->
-            <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
             <div class="image-container">
               <img 
                 src={processedPreviewSrc} 
-                alt="プレビュー" class="zoomable" class:processing={isProcessing} draggable="false" 
+                alt="プレビュー" class:processing={isProcessing} draggable="false" 
                 on:contextmenu|preventDefault
-                on:click={() => zoomedSrc = processedPreviewSrc}
               />
               {#if isProcessing}
                 <div class="loading-overlay">処理中...</div>
@@ -810,7 +805,6 @@
         
         {#if resultStats?.isAnimated && processedFramesUrls.length > 0}
           <div class="frame-controls responsive-controls">
-            <!-- PC用ボタン: モーダル内は1行に圧縮して幅を稼ぐ -->
             <div class="desktop-only">
               <div class="frame-buttons" style="margin-bottom: 0;">
                 <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメーション</button>
@@ -828,7 +822,6 @@
               </div>
             </div>
 
-            <!-- スマホ用ボタン (1行) -->
             <div class="control-row-single mobile-only-flex">
               <button class:active={currentFrame === -1} on:click={() => { currentFrame = -1; startSyncLoop(); }}>▶ アニメ</button>
               <button class:active={currentFrame !== -1} on:click={() => { 
@@ -854,7 +847,6 @@
                   <span class="separator">|</span>
                   圧縮後: {currentProcessedFrameIndex} / {Math.max(1, processedFramesUrls.length)} コマ
                 </span>
-                <!-- スマホ用スライダーテキスト -->
                 <span class="frame-counter mobile-only">
                   {currentTimeMs}ms <span class="separator">|</span> 元:{currentFrame + 1}コマ <span class="separator">|</span> 縮:{currentProcessedFrameIndex}コマ
                 </span>
@@ -897,7 +889,6 @@
               <!-- svelte-ignore a11y-click-events-have-key-events -->
               <!-- svelte-ignore a11y-no-static-element-interactions -->
               <div class="frame-image-wrapper" on:click={(e) => toggleFrameState(i, e)} title="クリックで切替 / Shift+クリックで範囲選択">
-                <!-- チラつき防止のため遅延読み込みなし -->
                 <img src={url} alt="コマ {i+1}" draggable="false" />
                 
                 {#if frameControls[i].state === 'absorb'}
@@ -1016,7 +1007,6 @@
   .comparison-container { display: flex; gap: 1rem; justify-content: center; align-items: flex-start; margin-top: 1rem; }
   .image-box { flex: 1; width: 48%; display: flex; flex-direction: column; }
   
-  /* ★ 通常画面: メタ情報エリアの高さ固定・横並び処理・左寄せ */
   .size-label-container { height: 5.5rem; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; text-align: left; margin-bottom: 0.5rem; }
   .label-title { font-size: 0.9em; color: #555; }
   .size-row { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
@@ -1028,7 +1018,6 @@
   .meta-info { font-size: 0.75rem; color: #888; margin-top: 2px; line-height: 1.4; display: block; }
   .meta-info-compact { font-size: 0.8rem; color: #666; white-space: nowrap; margin-left: 6px; }
 
-  /* ★ モーダル用メタ情報 (高さ固定を外し横並び1行化・左寄せ指定) */
   .modal-meta { height: auto; min-height: unset; margin-bottom: 0.25rem; flex-direction: row; justify-content: flex-start; align-items: baseline; gap: 8px; }
   .modal-meta .meta-values { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   .modal-meta .meta-info { display: inline; margin-top: 0; }
@@ -1065,7 +1054,6 @@
   .editor-toggle-btn:hover { background: #e0e0e0; }
   .editor-toggle-btn.active { background: #007bff; color: white; border-color: #007bff; }
 
-  /* --- モーダル全体 --- */
   .editor-modal-backdrop {
     position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
     background: rgba(0, 0, 0, 0.85); 
@@ -1101,7 +1089,6 @@
   .modal-top-section .frame-buttons { margin-bottom: 0.25rem; }
   .modal-top-section .frame-slider { margin-bottom: 0; }
 
-  /* --- 下部セクション --- */
   .editor-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;}
   .editor-header h3 { margin: 0; font-size: 1.1rem; }
   .editor-hint { font-size: 0.8rem; color: #666; }
@@ -1115,7 +1102,6 @@
   .batch-actions button:hover:not(:active) { background: #e9ecef; }
   .batch-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
 
-  /* ★ CSS変数による サムネイルサイズ可変対応 */
   .size-small { --thumb-min: 75px; --thumb-mobile: 60px; }
   .size-medium { --thumb-min: 110px; --thumb-mobile: 90px; }
   .size-large { --thumb-min: 150px; --thumb-mobile: 120px; }
@@ -1128,7 +1114,6 @@
   }
   .frame-container.strip .frame-item { min-width: var(--thumb-min, 110px); }
 
-  /* 小サイズ時のコントロール微調整 */
   .size-small .trim-controls button { font-size: 0.65rem; padding: 2px 0; letter-spacing: -0.5px; }
   .size-small .duration-control { font-size: 0.7rem; padding: 1px 2px; }
   .size-small .duration-control input { width: 36px; padding: 1px 2px; font-size: 0.75rem; }
@@ -1136,26 +1121,21 @@
   .size-small .state-overlay .icon { font-size: 1.2rem; }
   .size-small .state-overlay .text { font-size: 0.65rem; }
 
-  /* ★ CSSクラスによる レスポンシブ (PC/スマホ) 完全分離定義 ★ */
   .mobile-only { display: none !important; }
   .mobile-only-flex { display: none !important; }
 
   @media (max-width: 768px) {
-    /* PC表示を隠す */
     .desktop-only { display: none !important; }
 
-    /* スマホ表示を有効化 */
     .mobile-only { display: inline-block !important; }
     span.mobile-only { display: inline !important; }
     .mobile-only-flex { display: flex !important; }
 
-    /* モーダル上部の余白を削る */
     .modal-top-section { padding: 0.5rem 1rem; }
     .editor-modal-header { margin-bottom: 0.5rem; }
     .editor-modal-header h2 { font-size: 1.2rem; }
     .modal-close-x { padding: 0.4rem 1rem; font-size: 0.85rem; }
 
-    /* 画像プレビュー領域の極限圧縮 */
     .modal-top-section .image-container {
       padding: 10px; 
       height: auto;
@@ -1165,12 +1145,10 @@
     }
     .modal-top-section .comparison-container { gap: 0.5rem; }
 
-    /* スマホ時はメタ情報を縦方向に整理 */
     .modal-meta { flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: 0;}
     .modal-meta .label-title { font-size: 0.8rem; margin-bottom: 2px; line-height: 1.2; }
     .modal-meta .meta-values { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
 
-    /* ボタン群を1行に収める */
     .control-row-single { gap: 0.3rem; flex-wrap: nowrap; margin-bottom: 0.2rem; align-items: center; justify-content: center;}
     .control-row-single button { padding: 0.4rem 0.5rem; font-size: 0.75rem; flex: 1; border-radius: 4px; border: 1px solid #ccc; background: white; font-weight: bold; cursor: pointer; white-space: nowrap; }
     .control-row-single button.active { background: #6c757d; color: white; border-color: #6c757d; }
@@ -1182,7 +1160,6 @@
     .frame-slider { margin-bottom: 0; }
     .frame-counter { font-size: 0.7rem; }
 
-    /* 下部エディタ領域の余白調整 */
     .modal-bottom-section { padding: 0.5rem 1rem; }
     .editor-header { margin-bottom: 0.5rem; }
     .editor-header h3 { font-size: 1rem; }
@@ -1193,12 +1170,10 @@
   @media (max-width: 600px) {
     .frame-container.strip { flex-direction: column; overflow-x: hidden; overflow-y: auto; max-height: 450px; }
     .frame-container.strip .frame-item { flex-direction: row; align-items: center; width: 100%; box-sizing: border-box; }
-    /* スマホ表示時のストリップ幅も変数化 */
     .frame-container.strip .frame-image-wrapper { width: var(--thumb-mobile, 90px); height: var(--thumb-mobile, 90px); flex-shrink: 0; }
     .frame-container.strip .frame-controls-box { margin-left: 15px; flex: 1; display: flex; flex-direction: column; justify-content: center;}
   }
 
-  /* --- 共通の部品スタイル --- */
   .frame-image-wrapper { position: relative; cursor: pointer; background: #e5e5e5; border-radius: 4px; overflow: hidden; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; user-select: none; }
   .frame-image-wrapper img { max-width: 100%; max-height: 100%; object-fit: contain; }
   
