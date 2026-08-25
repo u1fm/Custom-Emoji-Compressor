@@ -49,6 +49,9 @@
   
   let fileInput;
 
+  // ★ 追加: デバイス判定用フラグ
+  let isMobile = false;
+
   // --- タイムラインシーク（時間ベース）用の状態管理 ---
   let currentTimeMs = 0;
 
@@ -186,6 +189,9 @@
   }
 
   onMount(() => {
+    // ★ PCかスマホかを画面幅で判定
+    isMobile = window.matchMedia('(max-width: 768px)').matches;
+
     worker = new Worker(new URL('./imageworker.js', import.meta.url), { type: 'module' });
     
     worker.onmessage = (e) => {
@@ -656,7 +662,6 @@
             </label>
           </div>
 
-          <!-- ★ トグルを廃止し、時間(ms)ベースの滑らかなシークバーに一本化 ＆ 情報を常時併記 -->
           {#if currentFrame !== -1}
             <div class="frame-slider">
               <input type="range" min="0" max={totalDuration > 0 ? totalDuration - 1 : 0} bind:value={currentTimeMs} on:input={syncFrameFromTime} />
@@ -700,7 +705,7 @@
 
   {#if zoomedSrc}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="zoom-modal" on:click={() => zoomedSrc = null} transition:fade={{ duration: 150 }}>
       <img src={zoomedSrc} alt="拡大プレビュー" draggable="false" on:contextmenu|preventDefault />
     </div>
@@ -804,7 +809,6 @@
               </label>
             </div>
 
-            <!-- ★ モーダル内のスライダーも時間ベースに一本化 ＆ 情報併記 -->
             {#if currentFrame !== -1}
               <div class="frame-slider">
                 <input type="range" min="0" max={totalDuration > 0 ? totalDuration - 1 : 0} bind:value={currentTimeMs} on:input={syncFrameFromTime} />
@@ -846,7 +850,8 @@
               <!-- svelte-ignore a11y-click-events-have-key-events -->
               <!-- svelte-ignore a11y-no-static-element-interactions -->
               <div class="frame-image-wrapper" on:click={(e) => toggleFrameState(i, e)} title="クリックで切替 / Shift+クリックで範囲選択">
-                <img src={url} alt="コマ {i+1}" draggable="false" loading="lazy" decoding="async" />
+                <!-- ★ デバイス幅に応じて loading 属性を動的に変更 -->
+                <img src={url} alt="コマ {i+1}" draggable="false" loading={isMobile ? 'lazy' : 'eager'} decoding="async" />
                 
                 {#if frameControls[i].state === 'absorb'}
                   <div class="state-overlay absorb">
@@ -1056,10 +1061,17 @@
     .frame-container.strip .frame-controls-box { margin-left: 15px; flex: 1; display: flex; flex-direction: column; justify-content: center;}
   }
 
+  /* ★ CSS修正: content-visibility をPCとスマホで動的に切り分け */
   .frame-item { 
     background: white; border: 1px solid #ddd; border-radius: 6px; padding: 6px; display: flex; flex-direction: column; gap: 6px; 
-    content-visibility: auto; contain-intrinsic-size: 110px 180px;
   }
+  @media (max-width: 768px) {
+    .frame-item {
+      content-visibility: auto; 
+      contain-intrinsic-size: 110px 180px;
+    }
+  }
+
   .frame-image-wrapper { position: relative; cursor: pointer; background: #e5e5e5; border-radius: 4px; overflow: hidden; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; user-select: none; }
   .frame-image-wrapper img { max-width: 100%; max-height: 100%; object-fit: contain; }
   
