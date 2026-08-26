@@ -975,7 +975,7 @@
         </p>
         <p style="margin-bottom: 0;">
           <strong>ライセンス全文</strong><br>
-          <a href="/licenses.txt" target="_blank" rel="noopener noreferrer">各ライブラリのライセンス全文はこちら (licenses.txt)</a>
+          <a href="https://github.com/u1fm/Custom-Emoji-Compressor/blob/beta/v1.2.0b/public/licenses.txt" target="_blank" rel="noopener noreferrer">各ライブラリのライセンス全文はこちら (licenses.txt)</a>
         </p>
       </div>
       <button class="close-modal-btn" on:click={() => showLicenseModal = false}>閉じる</button>
