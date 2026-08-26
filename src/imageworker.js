@@ -576,7 +576,6 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
       const previewBuffer = assembleAnimatedWebP(processedFrames, globalCache.outputWidth, globalCache.outputHeight, previewLoopCount);
       previewBlob = new Blob([previewBuffer], { type: 'image/webp' });
 
-      // ★ 修正: タイムライン編集時（コマ数が変わった時）も、コマ送り比較用にフレームごとのBlobを常に返す
       frameBlobs = processedFrames.map(f => new Blob([f.webpBuffer], { type: 'image/webp' }));
     } else {
       outputBlob = new Blob([processedFrames[0].webpBuffer], { type: 'image/webp' });
@@ -589,7 +588,7 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
       status: 'success',
       blob: isFinal ? outputBlob : previewBlob,
       originalFrames: isTimelineEdit ? null : globalCache.originalFramesPreviews, 
-      processedFrames: frameBlobs, // ★ isTimelineEdit の時も常に返す
+      processedFrames: frameBlobs,
       originalDurations: globalCache.originalDurations,
       originalSize: file.size,
       processedSize: outputBlob.size, 

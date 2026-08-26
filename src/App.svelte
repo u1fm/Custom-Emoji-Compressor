@@ -13,7 +13,6 @@
   let processedFramesUrls = [];
   let currentFrame = -1; 
   
-  // ★ 修正: URL文字列ではなく、「どちらの画像を開いているか」の状態を保持する
   let zoomedMode = null; // 'original' | 'processed' | null
   
   let showLicenseModal = false;
@@ -186,7 +185,7 @@
     
     currentTimeMs = 0;
     currentFrame = -1;
-    zoomedMode = null; // ★ 修正
+    zoomedMode = null;
     resultStats = null;
     isProcessing = false;
     isSaving = false;
@@ -601,7 +600,6 @@
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
-            <!-- ★ 修正: クリックした状態（モード）を渡すように変更 -->
             <img
               src={originalPreviewSrc} 
               alt="元画像" class="zoomable" draggable="false" 
@@ -631,7 +629,6 @@
           <!-- svelte-ignore a11y-click-events-have-key-events -->
           <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
-            <!-- ★ 修正: クリックした状態（モード）を渡すように変更 -->
             <img 
               src={processedPreviewSrc} 
               alt="プレビュー" class="zoomable" class:processing={isProcessing} draggable="false" 
@@ -723,7 +720,6 @@
     </div>
   {/if}
 
-  <!-- ★ 修正: モーダル画像は zoomedMode に応じて常に最新の src を参照する -->
   {#if zoomedMode}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
@@ -962,7 +958,7 @@
   <div class="zoom-modal" on:click={() => showLicenseModal = false} transition:fade={{ duration: 150 }}>
     <div class="license-box" on:click|stopPropagation>
       <h2>クレジット / ライセンス</h2>
-      <p class="license-intro">当ツールは、以下の素晴らしいツールやオープンソースライブラリを利用して構築されています。</p>
+      <p class="license-intro">当ツールは、以下のツールやライブラリを利用して構築されています。</p>
       <div class="license-list">
         <div class="license-item"><strong>アイコン作成: EmoteLab</strong></div>
         <div class="license-item"><strong>Svelte / Vite</strong><p>MIT License</p></div>
@@ -971,6 +967,16 @@
         <div class="license-item"><strong>gifuct-js</strong><p>MIT License</p></div>
         <div class="license-item"><strong>imagequant (Wasm)</strong><p>MIT / GPL License</p></div>
         <div class="license-item"><strong>pica</strong><p>MIT License</p></div>
+      </div>
+      <div class="source-link-area">
+        <p>
+          <strong>ソースコード</strong><br>
+          <a href="https://github.com/u1fm/Custom-Emoji-Compressor" target="_blank" rel="noopener noreferrer">https://github.com/u1fm/Custom-Emoji-Compressor</a>
+        </p>
+        <p style="margin-bottom: 0;">
+          <strong>ライセンス全文</strong><br>
+          <a href="/licenses.txt" target="_blank" rel="noopener noreferrer">各ライブラリのライセンス全文はこちら (licenses.txt)</a>
+        </p>
       </div>
       <button class="close-modal-btn" on:click={() => showLicenseModal = false}>閉じる</button>
     </div>
@@ -1232,4 +1238,9 @@
   .license-item p { margin: 0.25rem 0 0 0; font-size: 0.85rem; color: #555; }
   .close-modal-btn { display: block; width: 100%; background: #007bff; color: white; border: none; padding: 0.75rem; border-radius: 4px; font-weight: bold; cursor: pointer; text-align: center; }
   .close-modal-btn:hover { background: #0056b3; }
+
+  .source-link-area { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; color: #333; line-height: 1.5; margin-bottom: 1.5rem; }
+  .source-link-area p { margin: 0 0 1rem 0; }
+  .source-link-area a { color: #007bff; word-break: break-all; text-decoration: none; }
+  .source-link-area a:hover { text-decoration: underline; color: #0056b3; }
 </style>
