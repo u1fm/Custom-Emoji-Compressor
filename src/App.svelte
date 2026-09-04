@@ -13,7 +13,7 @@
   let processedFramesUrls = [];
   let currentFrame = -1; 
   
-  let zoomedMode = null; // 'original' | 'processed' | null
+  let zoomedMode = null; 
   
   let showLicenseModal = false;
   let showBatchDurationModal = false;
@@ -544,7 +544,7 @@
     {#if settings.mode === 'lossless'}
       <div class="setting-group">
         <div class="label-with-toggle">
-          <label>色数: {settings.colors}色</label>
+          <label>色数: <input type="number" min="2" max="256" bind:value={settings.colors} class="inline-number" on:input={() => isFreeColorMode = true} /> 色</label>
           <label class="checkbox-label">
             <input type="checkbox" checked={isFreeColorMode} on:change={handleModeToggle} />
             自由選択モード
@@ -562,7 +562,9 @@
       </div>
     {:else}
       <div class="setting-group">
-        <label>圧縮品質: {settings.lossyQuality}</label>
+        <div class="label-with-toggle">
+          <label>圧縮品質: <input type="number" min="0" max="100" bind:value={settings.lossyQuality} class="inline-number" /></label>
+        </div>
         <input type="range" min="0" max="100" bind:value={settings.lossyQuality} />
       </div>
     {/if}
@@ -958,7 +960,10 @@
   <div class="zoom-modal" on:click={() => showLicenseModal = false} transition:fade={{ duration: 150 }}>
     <div class="license-box" on:click|stopPropagation>
       <h2>クレジット / ライセンス</h2>
-      <p class="license-intro">当ツールは、以下のツールやライブラリを利用して構築されています。</p>
+      <p class="license-intro">
+        <strong>本アプリケーションのライセンス:</strong> GNU GPLv3<br>
+      </p>
+      <p class="license-intro" style="margin-top: 1rem;">当ツールは、以下の素晴らしいオープンソースライブラリを利用して構築されています。</p>
       <div class="license-list">
         <div class="license-item"><strong>アイコン作成: EmoteLab</strong></div>
         <div class="license-item"><strong>Svelte / Vite</strong><p>MIT License</p></div>
@@ -975,7 +980,7 @@
         </p>
         <p style="margin-bottom: 0;">
           <strong>ライセンス全文</strong><br>
-          <a href="https://github.com/u1fm/Custom-Emoji-Compressor/blob/beta/v1.2.0b/public/licenses.txt" target="_blank" rel="noopener noreferrer">各ライブラリのライセンス全文はこちら (licenses.txt)</a>
+          <a href="https://github.com/u1fm/Custom-Emoji-Compressor/blob/main/public/licenses.txt" target="_blank" rel="noopener noreferrer">各ライブラリのライセンス全文はこちら (GitHub)</a>
         </p>
       </div>
       <button class="close-modal-btn" on:click={() => showLicenseModal = false}>閉じる</button>
