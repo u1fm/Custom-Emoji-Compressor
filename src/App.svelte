@@ -258,13 +258,13 @@
             processedWidth: data.processedWidth,
             processedHeight: data.processedHeight,
             originalFrameCount: data.originalFrames ? data.originalFrames.length : (resultStats?.originalFrameCount || 1),
-            processedFrameCount: data.processedFrames ? data.processedFrames.length : (resultStats?.processedFrameCount || 1)
+            processedFrameCount: data.processedFrames ? data.processedFrames.length : (resultStats?.processedFrameCount || 1),
+            originalColorCount: data.originalColorCount,
+            hasTransparent: data.hasTransparent
           };
           
           isProcessing = false;
         } else {
-          console.error("Workerエラー:", data.message);
-          alert(`処理エラー: ${data.message}`);
           resetState();
         }
       }
@@ -285,7 +285,6 @@
     if (!file) return;
     const MAX_FILE_SIZE = 10 * 1024 * 1024;
     if (file.size > MAX_FILE_SIZE) {
-      alert(`ファイルサイズが大きすぎます（上限: 10MB）。\n現在のサイズ: ${formatSize(file.size)}`);
       resetState();
       return;
     }
@@ -503,8 +502,6 @@
   
   <input type="file" accept="image/png, image/jpeg, image/webp, image/gif" bind:this={fileInput} on:change={handleFileInputChange} style="display: none;" />
 
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <div class="dropzone" on:drop={handleDrop} on:dragover|preventDefault on:click={() => fileInput.click()}>
     <p>ここをクリックして画像を選択<br><small>またはドロップ、ペースト(Ctrl+V)</small></p>
     <p class="format-note">
@@ -597,10 +594,9 @@
               {getFileFormat(currentFile, resultStats?.isAnimated)}
               {#if resultStats?.originalHeight} | {resultStats.originalHeight} × {resultStats.originalWidth} px {/if}
               {#if resultStats?.isAnimated && resultStats?.originalFrameCount} | {resultStats.originalFrameCount} コマ {/if}
+              {#if resultStats?.originalColorCount !== null} | {resultStats.originalColorCount}{resultStats.hasTransparent ? ' + 1' : ''} 色{/if}
             </span>
           </div>
-          <!-- svelte-ignore a11y-click-events-have-key-events -->
-          <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
             <img
               src={originalPreviewSrc} 
@@ -628,8 +624,6 @@
               {#if resultStats?.isAnimated && resultStats?.processedFrameCount} | {resultStats.processedFrameCount} コマ {/if}
             </span>
           </div>
-          <!-- svelte-ignore a11y-click-events-have-key-events -->
-          <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
           <div class="image-container">
             <img 
               src={processedPreviewSrc} 
@@ -723,8 +717,6 @@
   {/if}
 
   {#if zoomedMode}
-    <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div class="zoom-modal" on:click={() => zoomedMode = null} transition:fade={{ duration: 150 }}>
       <img src={zoomedMode === 'original' ? originalPreviewSrc : processedPreviewSrc} alt="拡大プレビュー" draggable="false" on:contextmenu|preventDefault />
     </div>
@@ -732,8 +724,6 @@
 </main>
 
 {#if isEditorOpen && resultStats?.isAnimated && originalDurations.length > 1}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div class="editor-modal-backdrop" transition:fade={{ duration: 150 }}>
     <div class="editor-modal-content">
       
@@ -753,6 +743,7 @@
                   | {getFileFormat(currentFile, resultStats?.isAnimated)}
                   {#if resultStats?.originalHeight} | {resultStats.originalHeight} × {resultStats.originalWidth} px {/if}
                   {#if resultStats?.isAnimated && resultStats?.originalFrameCount} | {resultStats.originalFrameCount} コマ {/if}
+                  {#if resultStats?.originalColorCount !== null} | {resultStats.originalColorCount}{resultStats.hasTransparent ? ' + 1' : ''} 色{/if}
                 </span>
                 {#if resultStats?.isAnimated && resultStats?.originalFrameCount}
                   <span class="meta-info-compact mobile-only">{resultStats.originalFrameCount} コマ</span>
@@ -884,8 +875,6 @@
         <div class="frame-container {frameViewMode} size-{thumbnailSize}">
           {#each originalFramesUrls as url, i (i)}
             <div class="frame-item" class:discard={frameControls[i].state === 'discard'} class:absorb={frameControls[i].state === 'absorb'}>
-              <!-- svelte-ignore a11y-click-events-have-key-events -->
-              <!-- svelte-ignore a11y-no-static-element-interactions -->
               <div class="frame-image-wrapper" on:click={(e) => toggleFrameState(i, e)} title="クリックで切替 / Shift+クリックで範囲選択">
                 <img src={url} alt="コマ {i+1}" draggable="false" />
                 
@@ -928,8 +917,6 @@
 {/if}
 
 {#if showBatchDurationModal}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div class="zoom-modal" on:click={() => showBatchDurationModal = false} transition:fade={{ duration: 150 }}>
     <div class="license-box" on:click|stopPropagation>
       <h2>表示時間の一括設定</h2>
@@ -955,8 +942,6 @@
 </footer>
 
 {#if showLicenseModal}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div class="zoom-modal" on:click={() => showLicenseModal = false} transition:fade={{ duration: 150 }}>
     <div class="license-box" on:click|stopPropagation>
       <h2>クレジット / ライセンス</h2>

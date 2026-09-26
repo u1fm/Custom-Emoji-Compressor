@@ -15,7 +15,9 @@ let globalCache = {
   originalWidth: 0,
   originalHeight: 0,
   isAnimated: false,
-  formatStr: ""
+  formatStr: "",
+  originalColorCount: null,
+  hasTransparent: false
 };
 
 function assembleAnimatedWebP(frames, width, height, loopCount = 0) {
@@ -405,7 +407,6 @@ self.addEventListener('message', (event) => {
     if (latestJobId !== jobId) return;
     await processImage(jobId, file, settings, isFinal, isTimelineEdit);
   }).catch(err => {
-    console.error("Workerキューエラー:", err);
     self.postMessage({ jobId, status: 'error', message: err.message });
   });
 });
@@ -468,10 +469,31 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
       globalCache.baseFrames = [];
       globalCache.originalFramesPreviews = [];
       globalCache.originalDurations = [];
+      
+      const shouldCountColors = height <= 513;
+      let maxColorCount = 0;
+      let globalHasTransparent = false;
 
       for (let i = 0; i < frameCount; i++) {
         let { imageData, durationMs } = await decoder.getFrame(i);
         globalCache.originalDurations.push(durationMs); 
+
+        if (shouldCountColors) {
+          let frameUniqueColors = new Set();
+          const data = imageData.data;
+          for (let j = 0; j < data.length; j += 4) {
+            const a = data[j + 3];
+            if (a === 0) {
+              globalHasTransparent = true;
+            } else {
+              const color = (a << 24) | (data[j + 2] << 16) | (data[j + 1] << 8) | data[j];
+              frameUniqueColors.add(color);
+            }
+          }
+          if (frameUniqueColors.size > maxColorCount) {
+            maxColorCount = frameUniqueColors.size;
+          }
+        }
 
         const sourceCanvas = new OffscreenCanvas(width, height);
         sourceCanvas.getContext('2d', { willReadFrequently: true }).putImageData(imageData, 0, 0);
@@ -523,6 +545,8 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
       globalCache.originalHeight = height;
       globalCache.isAnimated = isAnimated;
       globalCache.formatStr = format;
+      globalCache.originalColorCount = shouldCountColors ? maxColorCount : null;
+      globalCache.hasTransparent = globalHasTransparent;
       globalCache.signature = sig; 
     }
 
@@ -599,10 +623,11 @@ async function processImage(jobId, file, settings, isFinal, isTimelineEdit) {
       isAnimated: globalCache.isAnimated,
       isFinal: isFinal,
       isTimelineEdit: isTimelineEdit,
-      detectedFormat: globalCache.formatStr 
+      detectedFormat: globalCache.formatStr,
+      originalColorCount: globalCache.originalColorCount,
+      hasTransparent: globalCache.hasTransparent
     });
   } catch (error) {
-    console.error("Worker内エラー:", error);
     self.postMessage({ jobId, status: 'error', message: error.message });
   }
 }
